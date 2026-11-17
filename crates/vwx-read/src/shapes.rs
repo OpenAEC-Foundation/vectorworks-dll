@@ -499,11 +499,6 @@ pub fn poly_mesh(r: &Record) -> Option<(Vec<P3>, Vec<Vec<usize>>)> {
     Some((positions?, (0..faces).map(face).collect::<Option<_>>()?))
 }
 
-/// The palette index of the fill colour of a drawn object (`u16` at 0x58).
-pub fn fill_index(r: &Record) -> Option<u16> {
-    le::u16(r.bytes, 0x58)
-}
-
 /// True for a polygon or polyline (types 5 and 21) whose last point is joined to its first:
 /// the byte at 0x8d (pair 190/191). Other shapes are closed by what they are.
 pub fn closed(r: &Record) -> bool {
@@ -537,15 +532,46 @@ pub fn text(r: &Record) -> Option<Text> {
     Some(Text { text, at: [left, top], width: right - left, height: top - bottom, size: real(r, 0x106 + 2 * lines as usize)?, lines })
 }
 
-/// The palette index of the pen colour of a drawn object (`u16` at 0x5a).
-pub fn pen_index(r: &Record) -> Option<u16> {
-    le::u16(r.bytes, 0x5a)
+/// What an object takes from its class instead of having it of its own: bits of the byte at
+/// 0x24 of its record (pairs 230 to 235).
+pub mod by_class {
+    pub const LINE_WEIGHT: u8 = 0x08;
+    pub const PEN_COLOUR: u8 = 0x10;
+    pub const FILL_COLOUR: u8 = 0x40;
+    pub const FILL: u8 = 0x80;
+}
+
+/// True when the object takes `what` (one of [`by_class`]) from its class.
+fn from_class(r: &Record, what: u8) -> bool {
+    r.bytes.get(0x24).is_some_and(|flags| flags & what != 0)
+}
+
+/// The palette index of the fill colour of a drawn object: its own (`u16` at 0x58), or that of
+/// its class (`u16` at 0x54 of the class record) when it takes it from there.
+pub fn fill_index(r: &Record, class: Option<&Record>) -> Option<u16> {
+    match class.filter(|_| from_class(r, by_class::FILL_COLOUR)) {
+        Some(class) => le::u16(class.bytes, 0x54),
+        None => le::u16(r.bytes, 0x58),
+    }
+}
+
+/// The palette index of the pen colour of a drawn object: its own (`u16` at 0x5a), or that of
+/// its class (`u16` at 0x56 of the class record).
+pub fn pen_index(r: &Record, class: Option<&Record>) -> Option<u16> {
+    match class.filter(|_| from_class(r, by_class::PEN_COLOUR)) {
+        Some(class) => le::u16(class.bytes, 0x56),
+        None => le::u16(r.bytes, 0x5a),
+    }
 }
 
 /// True when a drawn object has a fill: the `u32` at 0x64 is 0 for none (sample 102), 1 for a
-/// solid fill; other numbers are other fills.
-pub fn filled(r: &Record) -> bool {
-    le::u32(r.bytes, 0x64) != Some(0)
+/// solid fill; other numbers are other fills. An object that takes its fill from its class has
+/// 0 there, and the class says (`u32` at 0x60 of the class record).
+pub fn filled(r: &Record, class: Option<&Record>) -> bool {
+    match class.filter(|_| from_class(r, by_class::FILL)) {
+        Some(class) => le::u32(class.bytes, 0x60) != Some(0),
+        None => le::u32(r.bytes, 0x64) != Some(0),
+    }
 }
 
 /// The points of an arc (type 6) that is not a full circle: start point at 0x90, centre at
@@ -628,9 +654,28 @@ pub(crate) mod tests {
         // a full circle is an outline, not an arc
         assert!(arc(&rec(&record(kind::ARC, 210, &[(0x98, 1000.0), (0xc8, 360.0)]))).is_none());
         let mut rect = record(kind::RECTANGLE, 188, &[]);
-        assert!(!filled(&rec(&rect)));
+        assert!(!filled(&rec(&rect), None));
         rect[0x64] = 1;
-        assert!(filled(&rec(&rect)));
+        assert!(filled(&rec(&rect), None));
+    }
+
+    #[test]
+    fn attributes_by_class_as_samples_230_to_235() {
+        // the class of the samples: fill 1237 (red), pen 1238 (blue), a solid fill
+        let mut class = record(kind::CLASS, 188, &[]);
+        class[0x54..0x58].copy_from_slice(&[0xd5, 0x04, 0xd6, 0x04]);
+        class[0x60] = 1;
+        // a rectangle with its own white fill (256), black pen (257) and no fill pattern
+        let mut rect = record(kind::RECTANGLE, 188, &[]);
+        rect[0x58..0x5c].copy_from_slice(&[0x00, 0x01, 0x01, 0x01]);
+        let (c, own) = (rec(&class), rect.clone());
+        assert_eq!((fill_index(&rec(&own), Some(&c)), pen_index(&rec(&own), Some(&c)), filled(&rec(&own), Some(&c))), (Some(256), Some(257), false));
+        rect[0x24] = by_class::FILL_COLOUR;
+        assert_eq!((fill_index(&rec(&rect), Some(&c)), pen_index(&rec(&rect), Some(&c))), (Some(1237), Some(257)));
+        rect[0x24] = by_class::PEN_COLOUR | by_class::FILL;
+        assert_eq!((fill_index(&rec(&rect), Some(&c)), pen_index(&rec(&rect), Some(&c)), filled(&rec(&rect), Some(&c))), (Some(256), Some(1238), true));
+        // without its class at hand: its own
+        assert_eq!(fill_index(&rec(&rect), None), Some(256));
     }
 
     #[test]

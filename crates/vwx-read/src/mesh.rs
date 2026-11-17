@@ -446,7 +446,9 @@ impl Builder<'_, '_> {
     fn walk(&mut self, i: usize, place: &Affine, nested: bool, key: (usize, u32), depth: usize) {
         let raw = self.raw;
         let r = &raw.records[i];
-        let color = shapes::fill_index(r).and_then(|k| raw.palette.color(k)).unwrap_or(DEFAULT_COLOR);
+        // its class, for what it takes from there
+        let class = raw.by_ref.get(&r.class_id()).map(|&c| &raw.records[c]).filter(|c| c.kind() == kind::CLASS);
+        let color = shapes::fill_index(r, class).and_then(|k| raw.palette.color(k)).unwrap_or(DEFAULT_COLOR);
         match r.kind() {
             kind::END | kind::USER_DATA => {}
             // a viewport shows the model on a sheet: what it holds is laid out by it, which is
@@ -558,12 +560,12 @@ impl Builder<'_, '_> {
                     return;
                 }
                 let z = self.elevation;
-                let pen = shapes::pen_index(r).and_then(|k| raw.palette.color(k)).unwrap_or(PEN_COLOR);
+                let pen = shapes::pen_index(r, class).and_then(|k| raw.palette.color(k)).unwrap_or(PEN_COLOR);
                 if let Some(outline) = shapes::outline(r) {
                     let outline = counter_clockwise(outline);
                     let world: Vec<P3> = outline.iter().map(|p| place.apply([p[0], p[1], z])).collect();
                     // a shape with a fill is a face, one without is its outline
-                    if shapes::filled(r) {
+                    if shapes::filled(r, class) {
                         self.face(key, &world, color, place.mirrors());
                     } else {
                         self.stroke(key, &world, pen, shapes::closed(r));
@@ -579,7 +581,7 @@ impl Builder<'_, '_> {
                 }
                 if let Some([a, b]) = shapes::line(r) {
                     let z = self.elevation;
-                    let pen = shapes::pen_index(r).and_then(|k| raw.palette.color(k)).unwrap_or(PEN_COLOR);
+                    let pen = shapes::pen_index(r, class).and_then(|k| raw.palette.color(k)).unwrap_or(PEN_COLOR);
                     self.stroke(key, &[place.apply([a[0], a[1], z]), place.apply([b[0], b[1], z])], pen, false);
                 }
             }

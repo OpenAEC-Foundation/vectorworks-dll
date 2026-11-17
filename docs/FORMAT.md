@@ -76,6 +76,7 @@ Header (0x50 bytes, little-endian):
 | 0x1a | `u32le` | reference number of the object, 0 for none (pair 02/05: a named line gets one; layers, classes, symbol definitions and record formats always have one) |
 | 0x1f | `u8` | flags, `0x40` or `0x41` |
 | 0x20 | `u32le` | reference number of the class of the object (pair 02/40) |
+| 0x24 | `u8` | what the object takes from its class: bit 0x08 the line weight, 0x10 the pen colour, 0x40 the fill colour, 0x80 the fill (pairs 230 to 235; an object made with all its attributes by class has 0xff here and in the next byte) |
 | 0x26 | `u64le` | address of the parent object |
 | 0x2e | `u16` | `0x0011` objects, `0x0012`/`0x0002` user data and resources (not settled) |
 | 0x38 | 16 bytes | UUID of the object (zero in some records) |
@@ -123,8 +124,10 @@ layers.
 **Classes (type 94).** One record per class; its reference number at 0x1a is the number objects
 name at 0x20, its name is in the name list. The Dutch default class is `Geen` (number 2).
 Its visibility is the byte at 0xb6: 0 visible, 0xff invisible, 2 greyed (samples 130, 131, 132;
-the values the scripting interface gives). The `u16` at 0x54 is the palette index of its fill
-and bit 0x80 of the byte at 0x50 says objects take the class attributes when made (sample 132).
+the values the scripting interface gives). Its attributes: palette indexes as `u16`
+of the fill at 0x54 and of the pen at 0x56, the line weight as `u16` at 0x5e, the fill as `u32`
+at 0x60 (0 none, 1 solid); bit 0x80 of the byte at 0x50 says objects take the class attributes
+when made (samples 132, 230).
 
 **Layers (type 31).** Reference number at 0x1a, elevation `f64` at 0x20e (pair 90/95), its texts,
 one after the other from 0x2a2, each a `u32le` length in bytes and UTF-16LE: its name, its title
