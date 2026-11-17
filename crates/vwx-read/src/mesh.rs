@@ -109,9 +109,13 @@ pub fn scene(raw: &Raw, info: Info) -> Scene {
         builder.library();
     }
     let mut meshes: Vec<Mesh> = builder.batches.into_values().map(|b| b.mesh).filter(|m| !m.indices.is_empty() || !m.lines.is_empty()).collect();
-    // a document may be saved with every class of its model invisible (its sheets show the
-    // model through viewports with their own settings): then nothing would show, so all does
-    if meshes.iter().all(|m| m.hidden) {
+    // a document may be saved with the classes of its model invisible (its sheets show the
+    // model through viewports with their own settings, and so do its saved views): then
+    // little or nothing would show. When more than half of what is drawn would start hidden,
+    // all of it shows
+    let size = |m: &Mesh| m.indices.len() + m.lines.len();
+    let (hidden, all): (usize, usize) = meshes.iter().fold((0, 0), |(h, a), m| (h + if m.hidden { size(m) } else { 0 }, a + size(m)));
+    if 2 * hidden > all {
         meshes.iter_mut().for_each(|m| m.hidden = false);
     }
     Scene { info, meshes, views: views(raw), texts: texts(raw), sheets: sheets(raw) }
@@ -1112,7 +1116,7 @@ mod tests {
             let scene = scene(&raw, Info::default());
             assert_eq!((scene.meshes.len(), scene.meshes[1].hidden, scene.meshes[0].hidden), (2, hidden, false), "{visibility:#x}");
         }
-        // with nothing else to see, what is in an invisible class shows
+        // when most of what there is to see would start hidden, all of it shows
         let mut class = record(kind::CLASS, 188, &[]);
         class[0xb6] = 0xff;
         let rect = pen(record(kind::RECTANGLE, 188, &[(0xa4, 1.0), (0xac, 1000.0), (0xb4, 500.0)]));
