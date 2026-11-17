@@ -329,7 +329,7 @@ ball touches the one supporting surface to where it touches the other). Offset s
 not: their faces are filled flat between their edges and counted as approximate.
 
 Of the 641 490 faces in the corpus (plane 84 %, cylinder 7 %, B-surface 3 %, swept 1 %, the
-others under 1 % each) 4 851 are filled flat: 2 194 on blend and 199 on offset surfaces, the
+others under 1 % each) 2 831 are filled flat (0.4 %): 199 on offset surfaces, 174 on blends, the
 others faces whose loops could not be laid out in the parameters of their surface (a loop that
 seems to go around more than once, two loops around the axis the same way); 132 give no
 triangles. `Residential New Construction.sta`: all 4 345 faces on their surface.
