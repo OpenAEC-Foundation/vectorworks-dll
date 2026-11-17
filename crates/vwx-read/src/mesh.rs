@@ -143,13 +143,16 @@ fn texts_in(raw: &Raw, i: usize, place: &Affine, layer: &str, depth: usize, out:
                 let Some(t) = shapes::text(r) else { continue };
                 // the top left corner of its box, where its object puts it
                 let at = place.apply([t.at[0], t.at[1], 0.0]);
+                // (as large as its placement makes it: an annotation of a viewport is drawn at
+                // the scale of the viewport)
+                let k = (place.rows[0][0].powi(2) + place.rows[0][1].powi(2) + place.rows[0][2].powi(2)).sqrt();
                 out.push(vwx_model::Text {
                     id: c as u64,
                     layer: layer.to_string(),
                     text: t.text,
                     at: at.map(|v| (v * SCALE) as f32),
-                    width: (t.width * SCALE) as f32,
-                    height: (t.height * SCALE) as f32,
+                    width: (t.width * k * SCALE) as f32,
+                    height: (t.height * k * SCALE) as f32,
                     size: t.size as f32,
                     lines: t.lines,
                 });
@@ -165,9 +168,22 @@ fn texts_in(raw: &Raw, i: usize, place: &Affine, layer: &str, depth: usize, out:
     }
 }
 
+/// True for a group of a viewport that keeps a part of the drawing the viewport shows: the
+/// byte at 0x55 of the group is 1 (the three such groups of a section viewport and the one of
+/// an elevation in the corpus project; 0 in the groups of annotations and of the crop).
+fn keeps_drawing(group: &vwx_core::container::Record) -> bool {
+    group.bytes.get(0x55) == Some(&1)
+}
+
+/// True for the group of a viewport that holds its crop: it starts with user data tagged
+/// `porc` (sample 246).
+fn is_crop(raw: &Raw, group: usize) -> bool {
+    raw.children[group].first().is_some_and(|&t| raw.records[t].kind() == kind::USER_DATA && raw.records[t].bytes.get(0x50..0x54) == Some(b"porc"))
+}
+
 /// What a viewport keeps of the drawing it shows, as line segments on its sheet (metres): the
-/// groups among its children that hold shapes only (lines, polygons, polylines), in the
-/// millimetres of the view. A section viewport keeps the outlines of what it cuts (its group
+/// shapes (lines, polygons, polylines) of its groups that keep it, in the millimetres of the
+/// view. A section viewport keeps the outlines of what it cuts (its group
 /// tagged `hcsc`), the lines beyond the cut (`ncsp`) and the outline of the whole (`hcac`); an
 /// elevation the outline of what it shows. A point of the view lies on the sheet at the
 /// viewport's origin plus the point divided by the scale (`Section-1` of the corpus project:
@@ -176,11 +192,12 @@ fn kept_drawing(raw: &Raw, viewport: usize, v: &shapes::Viewport) -> Vec<[[f32; 
     let on_sheet = |p: P2| [((v.origin[0] + p[0] / v.scale) * SCALE) as f32, ((v.origin[1] + p[1] / v.scale) * SCALE) as f32];
     let mut out = Vec::new();
     for &group in raw.children[viewport].iter().filter(|&&g| raw.records[g].kind() == kind::GROUP) {
-        let shapes_of: Vec<usize> = raw.children[group].iter().copied().filter(|&c| !matches!(raw.records[c].kind(), kind::END | kind::USER_DATA | kind::RECORD | 101 | 125)).collect();
-        // (the group of its annotations holds objects of other kinds, laid out otherwise)
-        if shapes_of.is_empty() || !shapes_of.iter().all(|&c| matches!(raw.records[c].kind(), kind::LINE | kind::POLYGON | kind::POLYLINE | kind::RECTANGLE | kind::ARC | kind::OVAL)) {
+        // (its other groups are its annotations and its crop)
+        if !keeps_drawing(&raw.records[group]) {
             continue;
         }
+        let shapes_of: Vec<usize> =
+            raw.children[group].iter().copied().filter(|&c| matches!(raw.records[c].kind(), kind::LINE | kind::POLYGON | kind::POLYLINE | kind::RECTANGLE | kind::ARC | kind::OVAL)).collect();
         for c in shapes_of {
             let r = &raw.records[c];
             if let Some(vertices) = (r.kind() == kind::POLYLINE).then(|| shapes::polyline(r)).flatten() {
@@ -222,13 +239,24 @@ fn sheets(raw: &Raw) -> Vec<vwx_model::Sheet> {
         for &child in &raw.children[i] {
             builder.walk(child, &Affine::IDENTITY, false, (i, 0), 0);
         }
+        let mut texts = Vec::new();
+        texts_in(raw, i, &Affine::IDENTITY, &number, 0, &mut texts);
+        // the annotations of its viewports (labels, dimensions, notes): drawn in the
+        // millimetres of the sheet times the scale of the viewport
+        for &c in raw.children[i].iter().filter(|&&c| raw.records[c].kind() == kind::VIEWPORT) {
+            let Some(v) = shapes::viewport(&raw.records[c]) else { continue };
+            let k = 1.0 / v.scale;
+            let on_sheet = Affine { rows: [[k, 0.0, 0.0], [0.0, k, 0.0], [0.0, 0.0, k]], offset: [0.0; 3] };
+            for &group in raw.children[c].iter().filter(|&&g| raw.records[g].kind() == kind::GROUP && !keeps_drawing(&raw.records[g]) && !is_crop(raw, g)) {
+                builder.walk(group, &on_sheet, false, (i, 0), 0);
+                texts_in(raw, group, &on_sheet, &number, 0, &mut texts);
+            }
+        }
         let mut lines = Vec::new();
         for batch in builder.batches.values() {
             let point = |k: u32| [batch.mesh.positions[3 * k as usize], batch.mesh.positions[3 * k as usize + 1]];
             lines.extend(batch.mesh.lines.as_chunks::<2>().0.iter().map(|pair| [point(pair[0]), point(pair[1])]));
         }
-        let mut texts = Vec::new();
-        texts_in(raw, i, &Affine::IDENTITY, &number, 0, &mut texts);
         let mut viewports = Vec::new();
         for &c in raw.children[i].iter().filter(|&&c| raw.records[c].kind() == kind::VIEWPORT) {
             let Some(v) = shapes::viewport(&raw.records[c]) else { continue };
@@ -1140,6 +1168,8 @@ mod tests {
         let n = sheet.len() as u64;
         sheet[0..8].copy_from_slice(&n.to_le_bytes());
         let line = pen(record(kind::LINE, 140, &[(0x80, 420.0)]));
+        let mut kept = record(kind::GROUP, 204, &[]);
+        kept[0x55] = 1;
         let block = record(kind::PLUG_IN_OBJECT, 433, &[(0xf0, 1.0), (0x110, 1.0), (0x130, 1.0), (0x138, 100.0), (0x140, 50.0)]);
         let mut text = record(kind::TEXT, 0x19c, &[(0x68, 10.0), (0x70, 5.0), (0x78, 6.0), (0x80, 45.0), (0x108, 12.0)]);
         text[0xa6] = 5;
@@ -1162,9 +1192,13 @@ mod tests {
                 0,
             ),
             // with a group that keeps a line of its drawing: 5 m long, in the millimetres of the view
-            tagged(record(kind::GROUP, 204, &[]), 4, 0, 0),
+            tagged(kept, 4, 0, 0),
             tagged(pen(record(kind::LINE, 140, &[(0x80, 5000.0)])), 5, 0, 0),
             tagged(record(kind::END, 88, &[]), 5, 0, 0),
+            // and a group of annotations: a line of 2.5 m in the millimetres of the sheet times 50
+            tagged(record(kind::GROUP, 204, &[]), 4, 0, 0),
+            tagged(pen(record(kind::LINE, 140, &[(0x80, 2500.0)])), 6, 0, 0),
+            tagged(record(kind::END, 88, &[]), 6, 0, 0),
             tagged(record(kind::END, 88, &[]), 4, 0, 0),
             tagged(record(kind::END, 88, &[]), 2, 0, 0),
         ];
@@ -1179,7 +1213,9 @@ mod tests {
         // it names no layers: it shows none of the design layers (here there are none)
         assert!(v.hidden_layers.is_empty() && v.hidden_classes.is_empty());
         // its own line, and the line its viewport keeps: 100 mm long on the sheet, from the origin of the view
-        assert_eq!(sheet.lines, [[[0.0, 0.0], [0.42, 0.0]], [[-0.2, 0.1], [-0.1, 0.1]]]);
+        // then the annotation of the viewport (50 mm on the sheet), then the line the viewport keeps
+        // (100 mm, from the origin of the view)
+        assert_eq!(sheet.lines, [[[0.0, 0.0], [0.42, 0.0]], [[0.0, 0.0], [0.05, 0.0]], [[-0.2, 0.1], [-0.1, 0.1]]]);
         // the text of the title block, where the block is
         assert_eq!((sheet.texts[0].text.as_str(), sheet.texts[0].at), ("Plans", [0.105, 0.06, 0.0]));
     }

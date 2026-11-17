@@ -261,8 +261,10 @@ its annotations, and what it keeps of the drawing it shows, as shapes in the mil
 the view: a section viewport the outlines of what it cuts (`hcsc`, polygons and polylines with
 the records of the objects cut), the lines beyond the cut (`ncsp`) and the outline of the
 whole (`hcac`); an elevation the outline of what it shows. A point of the view lies on the
-sheet at the origin of the viewport plus the point divided by the scale. Where the cut of a
-section viewport lies in the model is not decoded.
+sheet at the origin of the viewport plus the point divided by the scale. The groups that keep
+the drawing have 1 in the byte at 0x55. The annotations (labels, dimensions, notes) are in the
+millimetres of the sheet times the scale: a label of `GF Plan` at (-18433, 12051) is at
+(-369, 241) on the sheet. Where the cut of a section viewport lies in the model is not decoded.
 
 ### Dimensions: type 63
 
