@@ -134,8 +134,25 @@ pub struct Sheet {
     /// Line segments, each from one point to another.
     pub lines: Vec<[[f32; 2]; 2]>,
     pub texts: Vec<Text>,
-    /// How many viewports it has.
-    pub viewports: usize,
+    /// The views of the model placed on it.
+    pub viewports: Vec<Viewport>,
+}
+
+/// A viewport: a view of the model on a sheet (metres on paper; directions in the model, Z up).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Viewport {
+    pub id: u64,
+    pub name: String,
+    /// The box it takes on the sheet: its lower left and upper right corner.
+    pub min: [f32; 2],
+    pub max: [f32; 2],
+    /// 1 : `scale`.
+    pub scale: f32,
+    /// Where the origin of the model lies on the sheet.
+    pub origin: [f32; 2],
+    /// From the eye into the model, and up on the sheet.
+    pub forward: [f32; 3],
+    pub up: [f32; 3],
 }
 
 /// A text of the document (metres, Z up).

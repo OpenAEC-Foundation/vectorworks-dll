@@ -34,6 +34,7 @@ pub mod kind {
     pub const USER_DATA: u8 = 76;
     pub const SWEEP: u8 = 34;
     pub const MULTIPLE_EXTRUDE: u8 = 38;
+    pub const DIMENSION: u8 = 63;
     pub const WALL: u8 = 68;
     pub const CSG_SOLID: u8 = 84;
     pub const NURBS_CURVE: u8 = 111;

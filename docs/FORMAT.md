@@ -235,6 +235,25 @@ window in a wall is a child of the wall. What a plug-in object holds (its 3D par
 shapes) is in its own coordinates: its placement is the matrix at 0xf0 with the offset at 0x138
 (a window of the corpus: offset (2000, 8050, 0), its extrude at (0, 40, 805)).
 
+### Viewports: type 122
+
+A viewport is a child of its sheet layer, named in the name list. The box it takes on the sheet
+at 0x68 (top, left, bottom, right); a placement at 0x8c whose offset at 0xd4 is where the origin
+of the model lies, in the millimetres of the model (divided by the scale: on the sheet); at
+0x23e nine `f64`, where the x, y and z of the model point in the view (x right, y up, z towards
+the eye: the other way round from the type 43 record of a saved view); the scale as an `f64`
+at 0x2e4 (pair 200/201: 50 and 100; samples 203, 204 for the view; the eight viewports of
+`Residential New Construction.sta`: two plans, two sections, four elevations, all 1 : 50). A
+viewport made by a script and never drawn has a box without a size. Which layers and classes
+it shows, its crop, and the cut of a section viewport are not decoded (user data `vpdn`).
+
+### Dimensions: type 63
+
+A dimension (848 bytes; its length as an `f64` at 0xb6, its offset at 0xbe) holds what it is
+drawn with as its children, in the coordinates it lies in: lines (witness lines, the dimension
+line, ticks) and a group with its text (samples 210 to 212; 317 of the 318 dimensions of two
+corpus projects have their lines inside their own box).
+
 ### Saved views: types 49 and 43
 
 A saved view is a type 49 record (89 bytes), a child of the type 51 record that holds them all;
@@ -315,6 +334,6 @@ type 85 child is a mesh (see the table above).
 
 ### Not decoded yet
 
-Viewports (122) and what a sheet layer shows, cubic vertices of polylines, NURBS curve (111) on its own, slab (71), plug-in object (86), viewport
+What a viewport shows (layers, classes, crop, cut), cubic vertices of polylines, NURBS curve (111) on its own, slab (71), plug-in object (86), viewport
 (122), records and formats (47, 48), styles (102, 107, 127), what a saved view shows (its `svdn` and `ccst` user data), sheet layers, class
 attributes and visibility.

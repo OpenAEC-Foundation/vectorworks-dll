@@ -83,6 +83,42 @@ pub fn plug_in_placement(r: &Record) -> Option<Affine> {
     placement(r, 0xf0)
 }
 
+/// A viewport (type 122) as it lies on its sheet layer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Viewport {
+    /// The box it takes on the sheet: its lower left and upper right corner (millimetres).
+    pub min: P2,
+    pub max: P2,
+    /// 1 : `scale`.
+    pub scale: f64,
+    /// Where the origin of the model lies on the sheet (millimetres).
+    pub origin: P2,
+    /// Right on the sheet, up on the sheet and towards the eye, as directions in the model.
+    pub axes: [P3; 3],
+}
+
+/// A viewport (type 122): the box it takes on its sheet at 0x68 (top, left, bottom, right); a
+/// placement at 0x8c whose offset at 0xd4 is where the origin of the model lies, in the
+/// millimetres of the model; at 0x23e nine `f64`, where the x, y and z of the model point in
+/// the view (x right, y up, z towards the eye); the scale as an `f64` at 0x2e4 (pair 200/201:
+/// 50 and 100; views 203, 204; the eight viewports of `Residential New Construction.sta`, all
+/// 1 : 50, whose two plans have the origin of the model at the same x on their sheet).
+pub fn viewport(r: &Record) -> Option<Viewport> {
+    let (top, left, bottom, right) = (real(r, 0x68)?, real(r, 0x70)?, real(r, 0x78)?, real(r, 0x80)?);
+    // a viewport that was never drawn has a box without a size
+    if [top, left, bottom, right].iter().any(|v| v.abs() > 1e7) || right <= left || top <= bottom {
+        return None;
+    }
+    let scale = real(r, 0x2e4).filter(|s| *s > 0.0).unwrap_or(1.0);
+    let at = xyz(r, 0xd4)?;
+    let m = placement(r, 0x23e)?.rows;
+    // the columns: what right, up and towards the eye are in the model
+    let axes = [0, 1, 2].map(|k| [m[0][k], m[1][k], m[2][k]]);
+    let dot = |a: P3, b: P3| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let square = (0..3).all(|i| (dot(axes[i], axes[i]) - 1.0).abs() < 1e-6 && dot(axes[i], axes[(i + 1) % 3]).abs() < 1e-6);
+    square.then_some(Viewport { min: [left, bottom], max: [right, top], scale, origin: [at[0] / scale, at[1] / scale], axes })
+}
+
 /// The way a view looks at the model (type 43, a child of a saved view or of a layer): at 0x9c
 /// nine `f64`, the directions in the document of right on the screen, up on the screen and
 /// towards the eye (sample 140: a view set to 60 and 45 degrees). Returned: right, up, towards
@@ -616,6 +652,20 @@ pub(crate) mod tests {
         b[0x8d] = 1;
         assert!(closed(&rec(&b)));
         assert!(closed(&rec(&record(kind::RECTANGLE, 188, &[]))));
+    }
+
+    #[test]
+    fn viewport_as_the_front_elevation_of_the_corpus() {
+        // on its sheet from (-477, -125) to (48, 106), 1 : 50, the model seen from the front:
+        // its x to the right, its z up, its y away from the eye
+        let reals = [(0x68, 106.0), (0x70, -477.0), (0x78, -125.0), (0x80, 48.0), (0xd4, -15846.1), (0xdc, -4853.2), (0x23e, 1.0), (0x266, -1.0), (0x276, 1.0), (0x2e4, 50.0)];
+        let v = viewport(&rec(&record(kind::VIEWPORT, 1130, &reals))).unwrap();
+        assert_eq!((v.min, v.max, v.scale), ([-477.0, -125.0], [48.0, 106.0], 50.0));
+        assert!((v.origin[0] + 316.922).abs() < 1e-9 && (v.origin[1] + 97.064).abs() < 1e-9);
+        assert_eq!(v.axes, [[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]]);
+        // one that was never drawn (made by a script) has no box
+        let never = [(0x68, 6.7e9), (0x70, -6.7e9), (0x78, -6.7e9), (0x80, 6.7e9), (0x23e, 1.0), (0x25e, 1.0), (0x27e, 1.0)];
+        assert!(viewport(&rec(&record(kind::VIEWPORT, 866, &never))).is_none());
     }
 
     #[test]

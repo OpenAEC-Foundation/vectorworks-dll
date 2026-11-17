@@ -154,7 +154,8 @@ fn texts_in(raw: &Raw, i: usize, place: &Affine, layer: &str, depth: usize, out:
                     lines: t.lines,
                 });
             }
-            kind::GROUP => texts_in(raw, c, place, layer, depth + 1, out),
+            // (a dimension holds its lines and, in a group, its text, where they are drawn)
+            kind::GROUP | kind::DIMENSION => texts_in(raw, c, place, layer, depth + 1, out),
             kind::PLUG_IN_OBJECT => {
                 let place = shapes::plug_in_placement(r).map_or(*place, |p| p.then(place));
                 texts_in(raw, c, &place, layer, depth + 1, out);
@@ -185,7 +186,20 @@ fn sheets(raw: &Raw) -> Vec<vwx_model::Sheet> {
         }
         let mut texts = Vec::new();
         texts_in(raw, i, &Affine::IDENTITY, &number, 0, &mut texts);
-        let viewports = raw.children[i].iter().filter(|&&c| raw.records[c].kind() == kind::VIEWPORT).count();
+        let mut viewports = Vec::new();
+        for &c in raw.children[i].iter().filter(|&&c| raw.records[c].kind() == kind::VIEWPORT) {
+            let Some(v) = shapes::viewport(&raw.records[c]) else { continue };
+            viewports.push(vwx_model::Viewport {
+                id: c as u64,
+                name: raw.name(c).unwrap_or_default().to_string(),
+                min: v.min.map(|x| (x * SCALE) as f32),
+                max: v.max.map(|x| (x * SCALE) as f32),
+                scale: v.scale as f32,
+                origin: v.origin.map(|x| (x * SCALE) as f32),
+                forward: v.axes[2].map(|x| -x as f32),
+                up: v.axes[1].map(|x| x as f32),
+            });
+        }
         out.push(vwx_model::Sheet { id: i as u64, number, title, lines, texts, viewports });
     }
     out
@@ -1064,19 +1078,23 @@ mod tests {
         let n = text.len() as u64;
         text[0..8].copy_from_slice(&n.to_le_bytes());
         let records = vec![
+            tagged(names(&[(77, "GF Plan")]), 1, 0, 0),
             tagged(sheet, 1, 1, 0),
             tagged(line, 2, 0, 0),
             tagged(block, 2, 0, 0),
             tagged(text, 3, 0, 0),
             tagged(record(kind::END, 88, &[]), 3, 0, 0),
-            tagged(record(kind::VIEWPORT, 858, &[]), 2, 0, 0),
+            // a plan of 1 : 50 as the first of the corpus
+            tagged(record(kind::VIEWPORT, 1082, &[(0x68, 275.0), (0x70, -369.0), (0x78, 27.0), (0x80, 172.0), (0x23e, 1.0), (0x25e, 1.0), (0x27e, 1.0), (0x2e4, 50.0)]), 2, 77, 0),
             tagged(record(kind::END, 88, &[]), 2, 0, 0),
         ];
         let u = unpacked(records);
         let scene = scene(&Raw::new(&u).unwrap(), Info::default());
         assert!(scene.meshes.is_empty());
         let sheet = &scene.sheets[0];
-        assert_eq!((sheet.number.as_str(), sheet.title.as_str(), sheet.viewports), ("001", "Plans", 1));
+        assert_eq!((sheet.number.as_str(), sheet.title.as_str()), ("001", "Plans"));
+        let v = &sheet.viewports[0];
+        assert_eq!((v.name.as_str(), v.min, v.max, v.scale, v.forward), ("GF Plan", [-0.369, 0.027], [0.172, 0.275], 50.0, [0.0, 0.0, -1.0]));
         assert_eq!(sheet.lines, [[[0.0, 0.0], [0.42, 0.0]]]);
         // the text of the title block, where the block is
         assert_eq!((sheet.texts[0].text.as_str(), sheet.texts[0].at), ("Plans", [0.105, 0.06, 0.0]));
