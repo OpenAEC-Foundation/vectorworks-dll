@@ -460,6 +460,38 @@ pub fn fill_index(r: &Record) -> Option<u16> {
     le::u16(r.bytes, 0x58)
 }
 
+/// The palette index of the pen colour of a drawn object (`u16` at 0x5a).
+pub fn pen_index(r: &Record) -> Option<u16> {
+    le::u16(r.bytes, 0x5a)
+}
+
+/// True when a drawn object has a fill: the `u32` at 0x64 is 0 for none (sample 102), 1 for a
+/// solid fill; other numbers are other fills.
+pub fn filled(r: &Record) -> bool {
+    le::u32(r.bytes, 0x64) != Some(0)
+}
+
+/// The points of an arc (type 6) that is not a full circle: start point at 0x90, centre at
+/// 0xb0, an angle `a` at 0xc0 and the sweep at 0xc8, in degrees: the arc runs from
+/// 90 - (a + sweep) to 90 - a, counter-clockwise from the x axis.
+pub fn arc(r: &Record) -> Option<Vec<P2>> {
+    let (start, centre, a, sweep) = (yx(r, 0x90)?, yx(r, 0xb0)?, real(r, 0xc0)?, real(r, 0xc8)?);
+    let radius = (start[0] - centre[0]).hypot(start[1] - centre[1]);
+    if radius <= 0.0 || sweep == 0.0 || sweep.abs() >= 360.0 {
+        return None;
+    }
+    let (from, to) = ((90.0 - (a + sweep)).to_radians(), (90.0 - a).to_radians());
+    let steps = (((to - from).abs() / std::f64::consts::TAU * CIRCLE_SEGMENTS as f64).ceil() as usize).max(1);
+    Some(
+        (0..=steps)
+            .map(|k| {
+                let t = from + (to - from) * k as f64 / steps as f64;
+                [centre[0] + radius * t.cos(), centre[1] + radius * t.sin()]
+            })
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -506,6 +538,22 @@ pub(crate) mod tests {
         // an arc with radius 0 takes all the room there is: here the whole shorter side
         let all = polyline_outline(&[Vertex { at: [0.0, 0.0], kind: 0, radius: 0.0 }, Vertex { at: [1000.0, 0.0], kind: 3, radius: 0.0 }, Vertex { at: [1000.0, 800.0], kind: 0, radius: 0.0 }]);
         assert!(all.iter().any(|p| (p[0] - 200.0).abs() < 1e-6 && p[1].abs() < 1e-6) && all.iter().all(|p| (p[0] - 1000.0).abs() > 1e-6 || (p[1] - 800.0).abs() < 1e-6), "{all:?}");
+    }
+
+    #[test]
+    fn arc_as_sample_16_and_fills() {
+        // a quarter about the origin with radius 1000: a = 0, sweep 90: from 0 to 90 degrees
+        let b = record(kind::ARC, 210, &[(0x98, 1000.0), (0xc8, 90.0)]);
+        let points = arc(&rec(&b)).unwrap();
+        let near = |p: P2, x: f64, y: f64| (p[0] - x).abs() < 1e-6 && (p[1] - y).abs() < 1e-6;
+        assert!(near(points[0], 1000.0, 0.0) && near(points[points.len() - 1], 0.0, 1000.0), "{points:?}");
+        assert!(points.len() >= 8 && points.iter().all(|p| (p[0].hypot(p[1]) - 1000.0).abs() < 1e-6));
+        // a full circle is an outline, not an arc
+        assert!(arc(&rec(&record(kind::ARC, 210, &[(0x98, 1000.0), (0xc8, 360.0)]))).is_none());
+        let mut rect = record(kind::RECTANGLE, 188, &[]);
+        assert!(!filled(&rec(&rect)));
+        rect[0x64] = 1;
+        assert!(filled(&rec(&rect)));
     }
 
     #[test]

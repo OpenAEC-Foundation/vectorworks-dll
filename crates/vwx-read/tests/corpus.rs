@@ -33,6 +33,7 @@ fn every_sample_reads() {
     let files = samples();
     assert!(!files.is_empty(), "set VWX_SAMPLES to the folder of the sample files");
     let (mut failed, mut with_meshes, mut objects, mut triangles) = (0, 0, 0usize, 0usize);
+    let (mut shown, mut segments, mut views) = (0, 0usize, 0usize);
     for path in &files {
         let data = std::fs::read(path).unwrap();
         let started = std::time::Instant::now();
@@ -49,11 +50,16 @@ fn every_sample_reads() {
         let n: usize = scene.meshes.iter().map(|m| m.indices.len() / 3).sum();
         triangles += n;
         with_meshes += usize::from(n > 0);
+        let lines: usize = scene.meshes.iter().map(|m| m.lines.len() / 2).sum();
+        segments += lines;
+        shown += usize::from(n + lines > 0);
+        views += scene.views.len();
         // the files that take long are worth a look
         if started.elapsed().as_secs() >= 10 {
             println!("SLOW  {} s  {}  {n} triangles", started.elapsed().as_secs(), path.display());
         }
     }
     println!("{} of {} files open, {objects} objects; {with_meshes} files with meshes, {triangles} triangles", files.len() - failed, files.len());
+    println!("{shown} files show something (faces or lines), {segments} line segments, {views} saved views");
     assert_eq!(failed, 0);
 }

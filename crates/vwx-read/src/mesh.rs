@@ -63,6 +63,8 @@ fn plug_in_category(name: &str) -> &'static str {
 
 /// Most fields of a record whose values are shown with its object.
 const MAX_RECORD_FIELDS: usize = 64;
+/// Colour of lines whose pen is not known.
+const PEN_COLOR: [u8; 3] = [30, 30, 30];
 /// Fill of objects whose colour is not known.
 const DEFAULT_COLOR: [u8; 3] = [200, 200, 204];
 
@@ -84,7 +86,7 @@ pub fn scene(raw: &Raw, info: Info) -> Scene {
                 Vec::new()
             };
             let key = (i, raw.records[child].class_id());
-            let start = builder.batch(key).mesh.indices.len() as u32;
+            let start = builder.mark(key);
             if inserts.is_empty() {
                 builder.walk(child, &Affine::IDENTITY, false, key, 0);
             } else {
@@ -95,17 +97,17 @@ pub fn scene(raw: &Raw, info: Info) -> Scene {
             builder.element(child, i, key, start);
             for insert in inserts {
                 let key = (i, raw.records[insert].class_id());
-                let start = builder.batch(key).mesh.indices.len() as u32;
+                let start = builder.mark(key);
                 builder.walk(insert, &Affine::IDENTITY, true, key, 1);
                 builder.element(insert, i, key, start);
             }
         }
     }
     // a library file places nothing on its layers: its symbols are what there is to see
-    if builder.batches.values().all(|b| b.mesh.indices.is_empty()) {
+    if builder.batches.values().all(|b| b.mesh.indices.is_empty() && b.mesh.lines.is_empty()) {
         builder.library();
     }
-    let mut meshes: Vec<Mesh> = builder.batches.into_values().map(|b| b.mesh).filter(|m| !m.indices.is_empty()).collect();
+    let mut meshes: Vec<Mesh> = builder.batches.into_values().map(|b| b.mesh).filter(|m| !m.indices.is_empty() || !m.lines.is_empty()).collect();
     // a document may be saved with every class of its model invisible (its sheets show the
     // model through viewports with their own settings): then nothing would show, so all does
     if meshes.iter().all(|m| m.hidden) {
@@ -133,7 +135,7 @@ fn views(raw: &Raw) -> Vec<View> {
 
 /// A symbol definition drawn for the library view: its record, its first index and first vertex
 /// in the mesh, and its lowest and highest corner in metres.
-type Shown = (usize, usize, usize, [f32; 3], [f32; 3]);
+type Shown = (usize, usize, usize, [f32; 3], [f32; 3], usize);
 
 /// The batch that holds the symbol definitions of a library file.
 const LIBRARY: (usize, u32) = (usize::MAX, 0);
@@ -178,20 +180,20 @@ impl Builder<'_, '_> {
         self.elevation = 0.0;
         let mut items: Vec<Shown> = Vec::new();
         for d in (0..raw.records.len()).filter(|&i| raw.records[i].kind() == kind::SYMBOL_DEFINITION) {
-            let (index, vertex) = {
+            let (index, vertex, line) = {
                 let mesh = &self.batch(LIBRARY).mesh;
-                (mesh.indices.len(), mesh.positions.len() / 3)
+                (mesh.indices.len(), mesh.positions.len() / 3, mesh.lines.len())
             };
             for nested in [true, false] {
                 for &c in &raw.children[d] {
                     self.walk(c, &Affine::IDENTITY, nested, LIBRARY, 1);
                 }
-                if self.batch(LIBRARY).mesh.indices.len() > index {
+                if self.batch(LIBRARY).mesh.indices.len() > index || self.batch(LIBRARY).mesh.lines.len() > line {
                     break;
                 }
             }
             let mesh = &self.batch(LIBRARY).mesh;
-            if mesh.indices.len() == index {
+            if mesh.indices.len() == index && mesh.lines.len() == line {
                 continue;
             }
             let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
@@ -201,23 +203,23 @@ impl Builder<'_, '_> {
                     hi[k] = hi[k].max(p[k]);
                 }
             }
-            items.push((d, index, vertex, lo, hi));
+            items.push((d, index, vertex, lo, hi, line));
         }
         if items.is_empty() {
             return;
         }
         // rows of about equal length and depth, a gap of a tenth of the average size between
         let size = |lo: &[f32; 3], hi: &[f32; 3], k: usize| (hi[k] - lo[k]).max(0.0);
-        let mean = items.iter().map(|(_, _, _, lo, hi)| size(lo, hi, 0).max(size(lo, hi, 1))).sum::<f32>() / items.len() as f32;
+        let mean = items.iter().map(|(_, _, _, lo, hi, _)| size(lo, hi, 0).max(size(lo, hi, 1))).sum::<f32>() / items.len() as f32;
         let gap = (mean * 0.1).max(0.05);
-        let area: f32 = items.iter().map(|(_, _, _, lo, hi)| (size(lo, hi, 0) + gap) * (size(lo, hi, 1) + gap)).sum();
-        let widest = items.iter().map(|(_, _, _, lo, hi)| size(lo, hi, 0)).fold(0.0, f32::max);
+        let area: f32 = items.iter().map(|(_, _, _, lo, hi, _)| (size(lo, hi, 0) + gap) * (size(lo, hi, 1) + gap)).sum();
+        let widest = items.iter().map(|(_, _, _, lo, hi, _)| size(lo, hi, 0)).fold(0.0, f32::max);
         let row_length = (area.sqrt() * 1.3).max(widest);
         let (mut x, mut y, mut depth) = (0.0f32, 0.0f32, 0.0f32);
         let ends: Vec<usize> = items.iter().skip(1).map(|item| item.2).collect();
         let mesh = &mut self.batch(LIBRARY).mesh;
         let last = mesh.positions.len() / 3;
-        for (n, (d, index, vertex, lo, hi)) in items.iter().enumerate() {
+        for (n, (d, index, vertex, lo, hi, line)) in items.iter().enumerate() {
             let (w, deep) = (size(lo, hi, 0), size(lo, hi, 1));
             if x > 0.0 && x + w > row_length {
                 x = 0.0;
@@ -239,20 +241,61 @@ impl Builder<'_, '_> {
                 map.insert("Name".into(), name.into());
             }
             map.insert("category".into(), crate::kinds::name(kind::SYMBOL_DEFINITION).into());
-            mesh.elements.push((*d as u64, *index as u32, count as u32));
+            if count > 0 {
+                mesh.elements.push((*d as u64, *index as u32, count as u32));
+            }
+            let lines = ends.get(n).map_or(mesh.lines.len(), |_| items[n + 1].5) - line;
+            if lines > 0 {
+                mesh.line_elements.push((*d as u64, *line as u32, lines as u32));
+            }
             mesh.props.push((*d as u64, serde_json::Value::Object(map).to_string()));
         }
     }
 
     /// Makes what was drawn in batch `key` since index `start` the pickable object `i` of
     /// layer `layer`, with its properties.
-    fn element(&mut self, i: usize, layer: usize, key: (usize, u32), start: u32) {
-        let count = self.batch(key).mesh.indices.len() as u32 - start;
-        if count > 0 {
-            let props = self.props(i, layer);
-            let mesh = &mut self.batch(key).mesh;
-            mesh.elements.push((i as u64, start, count));
-            mesh.props.push((i as u64, props));
+    fn element(&mut self, i: usize, layer: usize, key: (usize, u32), start: (u32, u32)) {
+        let now = self.mark(key);
+        let (triangles, lines) = (now.0 - start.0, now.1 - start.1);
+        if triangles + lines == 0 {
+            return;
+        }
+        let props = self.props(i, layer);
+        let mesh = &mut self.batch(key).mesh;
+        if triangles > 0 {
+            mesh.elements.push((i as u64, start.0, triangles));
+        }
+        if lines > 0 {
+            mesh.line_elements.push((i as u64, start.1, lines));
+        }
+        mesh.props.push((i as u64, props));
+    }
+
+    /// How far batch `key` is drawn: its counts of triangle and of line indexes.
+    fn mark(&mut self, key: (usize, u32)) -> (u32, u32) {
+        let mesh = &self.batch(key).mesh;
+        (mesh.indices.len() as u32, mesh.lines.len() as u32)
+    }
+
+    /// Adds the line through `points` (millimetres, placed already), back to its first point
+    /// when `closed`.
+    fn stroke(&mut self, key: (usize, u32), points: &[P3], color: [u8; 3], closed: bool) {
+        if points.len() < 2 || points.iter().flatten().any(|c| !c.is_finite()) {
+            return;
+        }
+        let mesh = &mut self.batch(key).mesh;
+        let base = (mesh.positions.len() / 3) as u32;
+        let n = points.len() as u32;
+        for p in points {
+            mesh.positions.extend(p.map(|c| (c * SCALE) as f32));
+            mesh.normals.extend([0.0; 3]);
+        }
+        if let Some(colors) = mesh.colors.as_mut() {
+            colors.extend(std::iter::repeat_n([color[0], color[1], color[2], 255], points.len()));
+        }
+        mesh.lines.extend((0..n - 1).flat_map(|k| [base + k, base + k + 1]));
+        if closed && n > 2 {
+            mesh.lines.extend([base + n - 1, base]);
         }
     }
 
@@ -420,11 +463,30 @@ impl Builder<'_, '_> {
                 if nested {
                     return;
                 }
+                let z = self.elevation;
+                let pen = shapes::pen_index(r).and_then(|k| raw.palette.color(k)).unwrap_or(PEN_COLOR);
                 if let Some(outline) = shapes::outline(r) {
                     let outline = counter_clockwise(outline);
-                    let z = self.elevation;
                     let world: Vec<P3> = outline.iter().map(|p| place.apply([p[0], p[1], z])).collect();
-                    self.face(key, &world, color, place.mirrors());
+                    // a shape with a fill is a face, one without is its outline
+                    if shapes::filled(r) {
+                        self.face(key, &world, color, place.mirrors());
+                    } else {
+                        self.stroke(key, &world, pen, true);
+                    }
+                } else if let Some(points) = (r.kind() == kind::ARC).then(|| shapes::arc(r)).flatten() {
+                    let world: Vec<P3> = points.iter().map(|p| place.apply([p[0], p[1], z])).collect();
+                    self.stroke(key, &world, pen, false);
+                }
+            }
+            kind::LINE => {
+                if nested {
+                    return;
+                }
+                if let Some([a, b]) = shapes::line(r) {
+                    let z = self.elevation;
+                    let pen = shapes::pen_index(r).and_then(|k| raw.palette.color(k)).unwrap_or(PEN_COLOR);
+                    self.stroke(key, &[place.apply([a[0], a[1], z]), place.apply([b[0], b[1], z])], pen, false);
                 }
             }
             kind::SYMBOL => {
@@ -438,8 +500,15 @@ impl Builder<'_, '_> {
                     return;
                 }
                 let place = instance.placement.then(place);
+                let before = self.mark(key);
                 for &c in &raw.children[definition] {
                     self.walk(c, &place, true, key, depth + 1);
+                }
+                // a symbol without a 3D form is its 2D shapes
+                if !nested && self.mark(key) == before {
+                    for &c in &raw.children[definition] {
+                        self.walk(c, &place, false, key, depth + 1);
+                    }
                 }
             }
             kind::GROUP => {
@@ -447,10 +516,18 @@ impl Builder<'_, '_> {
                     self.walk(c, place, nested, key, depth);
                 }
             }
-            // any other object: what it holds is part of it
+            // any other object: what it holds is part of it. Its 2D shapes are its plan view,
+            // left out beside its 3D form; an object without one (a label, a title block) is
+            // those shapes
             _ => {
+                let before = self.mark(key);
                 for &c in &raw.children[i] {
                     self.walk(c, place, true, key, depth);
+                }
+                if !nested && self.mark(key) == before {
+                    for &c in &raw.children[i] {
+                        self.walk(c, place, false, key, depth);
+                    }
                 }
             }
         }
@@ -833,8 +910,26 @@ mod tests {
     }
 
     #[test]
-    fn rectangle_on_a_layer_is_a_flat_face() {
+    fn lines_and_shapes_without_a_fill_are_line_work() {
+        // a line from (0, 0) to (1000, 0) and a rectangle without a fill, on a layer at 3000
+        let line = record(kind::LINE, 140, &[(0x80, 1000.0)]);
         let rect = record(kind::RECTANGLE, 188, &[(0xa4, 1.0), (0xac, 1000.0), (0xb4, 500.0)]);
+        let records = vec![tagged(layer("L", 3000.0), 1, 1, 0), tagged(line, 2, 0, 0), tagged(rect, 2, 0, 0), tagged(record(kind::END, 88, &[]), 2, 0, 0)];
+        let u = unpacked(records);
+        let scene = scene(&Raw::new(&u).unwrap(), Info::default());
+        let m = &scene.meshes[0];
+        // one segment and the four sides of the rectangle; nothing filled
+        assert_eq!((m.indices.len(), m.lines.len(), m.line_elements.len(), m.props.len()), (0, 10, 2, 2));
+        assert_eq!(m.line_elements[1], (2, 2, 8));
+        assert_eq!(&m.positions[..6], &[0.0, 0.0, 3.0, 1.0, 0.0, 3.0]);
+        assert_eq!(m.normals.len(), m.positions.len());
+    }
+
+    #[test]
+    fn rectangle_on_a_layer_is_a_flat_face() {
+        let mut rect = record(kind::RECTANGLE, 188, &[(0xa4, 1.0), (0xac, 1000.0), (0xb4, 500.0)]);
+        // with a solid fill
+        rect[0x64] = 1;
         let records = vec![tagged(layer("L", 3000.0), 1, 1, 0), tagged(rect, 2, 0, 0), tagged(record(kind::END, 88, &[]), 2, 0, 0)];
         let u = unpacked(records);
         let raw = Raw::new(&u).unwrap();

@@ -164,7 +164,7 @@ fn run(args: &[String]) -> Result<Option<Value>, String> {
             Ok(Some(json!({
                 "info": scene.info,
                 "meshes": scene.meshes.iter().map(|m| json!({
-                    "name": m.name, "triangles": m.indices.len() / 3, "objects": m.elements.len(), "hidden": m.hidden,
+                    "name": m.name, "triangles": m.indices.len() / 3, "lines": m.lines.len() / 2, "objects": m.props.len(), "hidden": m.hidden,
                 })).collect::<Vec<_>>(),
                 "views": scene.views,
             })))

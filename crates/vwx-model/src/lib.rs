@@ -103,6 +103,11 @@ pub struct Mesh {
     pub props: Vec<(u64, String)>,
     /// Hidden in the file (an invisible layer or class): starts switched off.
     pub hidden: bool,
+    /// Line segments (lines, arcs, the outlines of shapes without a fill): pairs of vertex
+    /// numbers. Their vertices are not used by `indices`.
+    pub lines: Vec<u32>,
+    /// The objects among the line segments: (object id, first index into `lines`, count).
+    pub line_elements: Vec<(u64, u32, u32)>,
 }
 
 /// What a viewer needs of a document.
