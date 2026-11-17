@@ -210,6 +210,8 @@ fn run(args: &[String]) -> Result<Option<Value>, String> {
             let mut schemas = std::collections::BTreeMap::<String, usize>::new();
             let (mut ok, mut nodes) = (0usize, 0usize);
             let (mut faces, mut approximate, mut skipped, mut triangles) = (0usize, 0usize, 0usize, 0usize);
+            let mut straight = std::collections::BTreeMap::<String, usize>::new();
+            let mut approximate_by = std::collections::BTreeMap::<String, usize>::new();
             let (mut lo, mut hi) = ([f64::MAX; 3], [f64::MIN; 3]);
             let mut obj = String::new();
             let mut obj_base = 1u32;
@@ -227,6 +229,13 @@ fn run(args: &[String]) -> Result<Option<Value>, String> {
                         faces += mesh.faces;
                         approximate += mesh.approximate;
                         skipped += mesh.skipped;
+                        for code in &mesh.straight_edges {
+                            *straight.entry(vwx_xt::schema::base(*code).map_or("none", |b| b.0).to_string()).or_default() += 1;
+                        }
+                        for (code, why) in &mesh.approximate_surfaces {
+                            let name = vwx_xt::schema::base(*code).map_or("none", |b| b.0);
+                            *approximate_by.entry(format!("{name}: {why}")).or_default() += 1;
+                        }
                         triangles += mesh.triangles.len();
                         for p in &mesh.positions {
                             for a in 0..3 {
@@ -254,7 +263,7 @@ fn run(args: &[String]) -> Result<Option<Value>, String> {
             let bounds = if triangles > 0 { json!([lo, hi]) } else { Value::Null };
             Ok(Some(json!({
                 "bodies": starts.len(), "parsed": ok, "nodes": nodes, "schemas": schemas, "types": kinds, "errors": errors,
-                "faces": faces, "approximate_faces": approximate, "skipped_faces": skipped, "triangles": triangles, "bounds": bounds,
+                "faces": faces, "approximate_faces": approximate, "skipped_faces": skipped, "triangles": triangles, "bounds": bounds, "straight_edges_by_curve": straight, "approximate_by_surface": approximate_by,
             })))
         }
         "probe" => to(serde_json::to_value(Probe::of(&read(file()?)?))),

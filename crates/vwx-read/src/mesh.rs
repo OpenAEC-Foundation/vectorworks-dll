@@ -2,9 +2,10 @@
 //!
 //! What is drawn so far (`docs/ARCHITECTURE.md` has the list of what is not):
 //!
-//! - extrudes of rectangles, ovals, circles and polygons;
-//! - 3D polygons and meshes;
-//! - CSG solids, walls, sweeps, multiple extrudes and NURBS surfaces from the Parasolid body the
+//! - extrudes and multiple extrudes of any profile (from the points Vectorworks keeps for the
+//!   profile, type 42), and sweeps;
+//! - 3D polygons, meshes and primitive solids (sphere, hemisphere, cone);
+//! - CSG solids, walls and NURBS surfaces from the Parasolid body the
 //!   file keeps for them (`vwx-xt`); faces on surfaces that are not evaluated yet (B-surfaces,
 //!   blends) are filled flat;
 //! - rectangles, ovals, circles and polygons drawn on a layer itself, as flat faces at the
@@ -203,7 +204,7 @@ impl Builder<'_, '_> {
         match r.kind() {
             kind::END | kind::USER_DATA => {}
             // the children of a CSG solid are its operands; the result is its Parasolid body
-            kind::CSG_SOLID | kind::SWEEP | kind::MULTIPLE_EXTRUDE | kind::NURBS_SURFACE => {
+            kind::CSG_SOLID | kind::NURBS_SURFACE => {
                 self.body(i, place, key, color, true);
             }
             kind::EXTRUDE => {
@@ -214,9 +215,54 @@ impl Builder<'_, '_> {
                 let Some(e) = shapes::extrude(r) else { return };
                 let place = e.placement.then(place);
                 for &c in &raw.children[i] {
-                    if let Some(outline) = shapes::outline(&raw.records[c]) {
+                    // the profile as Vectorworks stepped it, at the bottom and at the top
+                    if let Some(rings) = self.grid_of(c) {
+                        self.loft(key, &rings, &place, color, false, true);
+                    } else if let Some(outline) = shapes::outline(&raw.records[c]) {
                         self.prism(key, &outline, e.bottom, e.top, &place, color);
                     }
+                }
+            }
+            kind::SOLID => {
+                // a sphere, hemisphere or cone: the mesh Vectorworks keeps for it
+                let Some(&child) = raw.children[i].iter().find(|&&c| raw.records[c].kind() == kind::POLY_MESH) else { return };
+                let Some((points, faces)) = shapes::poly_mesh(&raw.records[child]) else { return };
+                for face in faces {
+                    let corners: Vec<P3> = face.iter().map(|&k| place.apply(points[k])).collect();
+                    self.face(key, &corners, color, place.mirrors());
+                }
+            }
+            kind::MULTIPLE_EXTRUDE => {
+                if self.body(i, place, key, color, false) {
+                    return;
+                }
+                // one ring per profile, in the object's own coordinates
+                let (Some(rings), Some((placement, _))) = (self.grid_of(i), shapes::solid_frame(r)) else { return };
+                self.loft(key, &rings, &placement.then(place), color, false, true);
+            }
+            kind::SWEEP => {
+                if self.body(i, place, key, color, false) {
+                    return;
+                }
+                let Some(sweep) = shapes::sweep(r) else { return };
+                let place = sweep.placement.then(place);
+                for &c in &raw.children[i] {
+                    // the rings Vectorworks keeps for the profile, else the profile turned here
+                    let (rings, closed) = match self.grid_of(c) {
+                        Some(mut rings) => {
+                            rings.dedup();
+                            let closed = rings.len() > 2 && same_ring(&rings[0], &rings[rings.len() - 1]);
+                            if closed {
+                                rings.pop();
+                            }
+                            (rings, closed)
+                        }
+                        None => match shapes::outline(&raw.records[c]).filter(|p| p.len() >= 3) {
+                            Some(profile) => sweep.rings(&profile),
+                            None => continue,
+                        },
+                    };
+                    self.loft(key, &rings, &place, color, closed, !closed);
                 }
             }
             kind::POLYGON_3D => {
@@ -319,6 +365,49 @@ impl Builder<'_, '_> {
         true
     }
 
+    /// The grid of points (type 42) among the children of record `i`.
+    fn grid_of(&self, i: usize) -> Option<Vec<Vec<P3>>> {
+        let raw = self.raw;
+        raw.children[i].iter().find(|&&c| raw.records[c].kind() == kind::PROFILE_GRID).and_then(|&c| shapes::grid(&raw.records[c]))
+    }
+
+    /// The surface through rings of points, each ring a closed profile with its points in the
+    /// same order: the faces between ring and ring, with `closed` also from the last ring back
+    /// to the first, and with `caps` the first and last ring filled.
+    fn loft(&mut self, key: (usize, u32), rings: &[Vec<P3>], place: &Affine, color: [u8; 3], closed: bool, caps: bool) {
+        let n = rings.first().map_or(0, Vec::len);
+        if rings.len() < 2 || n < 3 || rings.iter().any(|r| r.len() != n) {
+            return;
+        }
+        let world: Vec<Vec<P3>> = rings.iter().map(|ring| ring.iter().map(|p| place.apply(*p)).collect()).collect();
+        // which way the profile turns, seen along the way the rings go: decides which side of
+        // the faces is the outside
+        let Some(normal) = newell(&world[0]) else { return };
+        let forward: f64 = (0..n).map(|k| (0..3).map(|a| (world[1][k][a] - world[0][k][a]) * normal[a]).sum::<f64>()).sum();
+        let outward = forward >= 0.0;
+        let pairs = rings.len() - usize::from(!closed);
+        for r in 0..pairs {
+            let (a, b) = (&world[r], &world[(r + 1) % rings.len()]);
+            for k in 0..n {
+                let j = (k + 1) % n;
+                if a[k] == a[j] && b[k] == b[j] {
+                    continue;
+                }
+                let quad = if outward { [a[k], a[j], b[j], b[k]] } else { [a[k], b[k], b[j], a[j]] };
+                // two triangles: a quad between turned rings is not flat
+                self.face(key, &[quad[0], quad[1], quad[2]], color, false);
+                self.face(key, &[quad[0], quad[2], quad[3]], color, false);
+            }
+        }
+        if caps {
+            let first: Vec<P3> = if outward { world[0].iter().rev().copied().collect() } else { world[0].clone() };
+            let last = &world[rings.len() - 1];
+            let last: Vec<P3> = if outward { last.clone() } else { last.iter().rev().copied().collect() };
+            self.face(key, &first, color, false);
+            self.face(key, &last, color, false);
+        }
+    }
+
     /// The prism of a closed outline in the local xy plane between two heights.
     fn prism(&mut self, key: (usize, u32), outline: &[P2], bottom: f64, top: f64, place: &Affine, color: [u8; 3]) {
         let outline = counter_clockwise(outline.to_vec());
@@ -363,6 +452,12 @@ impl Builder<'_, '_> {
             mesh.indices.extend(t.map(|k| base + k as u32));
         }
     }
+}
+
+/// True when two rings are the same points, to a thousandth of their size.
+fn same_ring(a: &[P3], b: &[P3]) -> bool {
+    let size = a.iter().flatten().fold(1.0f64, |m, c| m.max(c.abs()));
+    a.len() == b.len() && a.iter().zip(b).all(|(p, q)| (0..3).all(|k| (p[k] - q[k]).abs() <= 1e-6 * size))
 }
 
 fn counter_clockwise(mut outline: Vec<P2>) -> Vec<P2> {

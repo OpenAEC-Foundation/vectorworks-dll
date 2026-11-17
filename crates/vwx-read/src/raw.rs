@@ -21,6 +21,8 @@ pub mod kind {
     pub const LAYER: u8 = 31;
     pub const MESH: u8 = 40;
     pub const MESH_FACE: u8 = 41;
+    /// The points Vectorworks worked out for a profile inside a 3D object.
+    pub const PROFILE_GRID: u8 = 42;
     pub const NAMES: u8 = 55;
     pub const USER_DATA: u8 = 76;
     pub const SWEEP: u8 = 34;
@@ -29,7 +31,11 @@ pub mod kind {
     pub const NURBS_SURFACE: u8 = 113;
     /// The cached solid body of its parent: wire frame and Parasolid data.
     pub const BODY: u8 = 114;
+    /// The mesh of a primitive solid, a child of it.
+    pub const POLY_MESH: u8 = 85;
     pub const CLASS: u8 = 94;
+    /// A primitive solid: sphere, hemisphere, cone.
+    pub const SOLID: u8 = 95;
 }
 
 /// The records of a file with their tree.

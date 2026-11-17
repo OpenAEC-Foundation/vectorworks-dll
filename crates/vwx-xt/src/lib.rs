@@ -10,6 +10,7 @@
 
 pub mod curve;
 pub mod geom;
+pub mod nurbs;
 pub mod parse;
 pub mod schema;
 pub mod surface;

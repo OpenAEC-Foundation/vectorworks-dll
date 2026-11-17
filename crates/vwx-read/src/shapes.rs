@@ -168,6 +168,56 @@ pub fn polygon_3d(r: &Record) -> Option<Vec<P3>> {
     (0..count).map(|k| xyz(r, 0xd2 + 24 * k)).collect()
 }
 
+/// The points of a profile as Vectorworks worked them out (type 42, a child of the profile or of
+/// a multiple extrude): `u16` points per ring at 0x6c, `u16` rings at 0x6e, `u16` total at 0x70,
+/// then x, y, z from 0x72, for each point of the profile one per ring. Returned by ring.
+///
+/// An extrude has two rings (bottom and top), a multiple extrude one per profile; curves are
+/// already stepped. For a sweep every ring is the profile where it was drawn.
+pub fn grid(r: &Record) -> Option<Vec<Vec<P3>>> {
+    let (points, rings, total) = (le::u16(r.bytes, 0x6c)? as usize, le::u16(r.bytes, 0x6e)? as usize, le::u16(r.bytes, 0x70)? as usize);
+    if points == 0 || rings == 0 || points * rings != total {
+        return None;
+    }
+    (0..rings).map(|ring| (0..points).map(|point| xyz(r, 0x72 + 24 * (point * rings + ring))).collect()).collect()
+}
+
+/// A sweep (type 34): its profile, drawn in the local xy plane, turned about the line through
+/// the smallest x of the profile along local y. Placement at 0xcc; pitch (the rise along the
+/// axis in one turn) at 0x140, step, start and arc in degrees at 0x148, 0x150, 0x158.
+pub struct Sweep {
+    pub placement: Affine,
+    pub pitch: f64,
+    pub step: f64,
+    pub start: f64,
+    pub arc: f64,
+}
+
+pub fn sweep(r: &Record) -> Option<Sweep> {
+    Some(Sweep { placement: placement(r, 0xcc)?, pitch: real(r, 0x140)?, step: real(r, 0x148)?, start: real(r, 0x150)?, arc: real(r, 0x158)? })
+}
+
+impl Sweep {
+    /// The rings the profile goes through, and whether the last ring is the first again (a full
+    /// turn without pitch). At angle a the point (x, y) is at
+    /// (axis + (x - axis) sin a, y + pitch (a - start) / 360, (x - axis) cos a).
+    pub fn rings(&self, profile: &[P2]) -> (Vec<Vec<P3>>, bool) {
+        let axis = profile.iter().map(|p| p[0]).fold(f64::MAX, f64::min);
+        let closed = self.arc.abs() >= 360.0 - 1e-9 && self.pitch == 0.0;
+        let step = if self.step.abs() < 0.5 { 15.0 } else { self.step.abs() };
+        let steps = ((self.arc.abs() / step).ceil() as usize).clamp(1, 2880);
+        let rings = (0..=steps)
+            .take(steps + usize::from(!closed))
+            .map(|k| {
+                let turned = self.arc * k as f64 / steps as f64;
+                let (sin, cos) = (self.start + turned).to_radians().sin_cos();
+                profile.iter().map(|p| [axis + (p[0] - axis) * sin, p[1] + self.pitch * turned / 360.0, (p[0] - axis) * cos]).collect()
+            })
+            .collect();
+        (rings, closed)
+    }
+}
+
 /// The placement of a 3D object that has one at 0xcc (extrude, sweep, multiple extrude, CSG
 /// solid), and its box in its own coordinates at 0x9c (largest then smallest x, y, z).
 pub fn solid_frame(r: &Record) -> Option<(Affine, [P3; 2])> {
@@ -203,6 +253,30 @@ pub fn mesh_points(r: &Record) -> Option<Vec<P3>> {
 pub fn mesh_face(r: &Record) -> Option<Vec<usize>> {
     let count = le::u16(r.bytes, 0xcc)? as usize;
     (0..count).map(|k| (le::u32(r.bytes, 0xce + 4 * k)? as usize).checked_sub(1)).collect()
+}
+
+/// The mesh a primitive solid keeps (type 85, a child of the type 95 solid), in the coordinates
+/// the solid is placed in: `u32` counts of points, corner numbers, faces and edges at 0x8c; the
+/// points (x, y, z) from 0x9c; the corner numbers as `u32`, counted from 1; per face a `u32`
+/// count of corners and the `u32` position of its first in that list; per edge 16 bytes.
+/// Returned: the points and, per face, its corners counted from 0.
+pub fn poly_mesh(r: &Record) -> Option<(Vec<P3>, Vec<Vec<usize>>)> {
+    let count = |at: usize| le::u32(r.bytes, at).map(|n| n as usize);
+    let (points, corners, faces) = (count(0x8c)?, count(0x90)?, count(0x94)?);
+    let corners_at = 0x9cusize.checked_add(points.checked_mul(24)?)?;
+    let faces_at = corners_at.checked_add(corners.checked_mul(4)?)?;
+    if faces_at.checked_add(faces.checked_mul(8)?)? > r.bytes.len() {
+        return None;
+    }
+    let positions: Option<Vec<P3>> = (0..points).map(|k| xyz(r, 0x9c + 24 * k)).collect();
+    let face = |k: usize| -> Option<Vec<usize>> {
+        let (n, first) = (count(faces_at + 8 * k)?, count(faces_at + 8 * k + 4)?);
+        if first.checked_add(n)? > corners {
+            return None;
+        }
+        (0..n).map(|c| count(corners_at + 4 * (first + c))?.checked_sub(1).filter(|p| *p < points)).collect()
+    };
+    Some((positions?, (0..faces).map(face).collect::<Option<_>>()?))
 }
 
 /// The palette index of the fill colour of a drawn object (`u16` at 0x58).
@@ -275,6 +349,69 @@ pub(crate) mod tests {
         // a point number of 0 is not a point
         f[0xce] = 0;
         assert!(mesh_face(&rec(&f)).is_none());
+    }
+
+    #[test]
+    fn grid_as_sample_28_two_rings_of_four() {
+        // (250, 750, 2000) on the first ring, (0, 1000, 0) on the second, for the first point
+        let mut b = record(42, 0x72 + 8 * 24, &[]);
+        b[0x6c] = 4;
+        b[0x6e] = 2;
+        b[0x70] = 8;
+        for (k, v) in [250.0f64, 750.0, 2000.0, 0.0, 1000.0, 0.0].iter().enumerate() {
+            b[0x72 + 8 * k..0x7a + 8 * k].copy_from_slice(&v.to_le_bytes());
+        }
+        let g = grid(&rec(&b)).unwrap();
+        assert_eq!((g.len(), g[0].len()), (2, 4));
+        assert_eq!((g[0][0], g[1][0]), ([250.0, 750.0, 2000.0], [0.0, 1000.0, 0.0]));
+        // counts that do not multiply out are not a grid
+        b[0x70] = 7;
+        assert!(grid(&rec(&b)).is_none());
+    }
+
+    #[test]
+    fn sweep_as_samples_200_201_203() {
+        let profile = [[500.0, 0.0], [1000.0, 0.0], [1000.0, 300.0], [500.0, 300.0]];
+        let bounds = |rings: &[Vec<P3>]| {
+            let (mut lo, mut hi) = ([f64::MAX; 3], [f64::MIN; 3]);
+            for p in rings.iter().flatten() {
+                for k in 0..3 {
+                    lo[k] = lo[k].min(p[k]);
+                    hi[k] = hi[k].max(p[k]);
+                }
+            }
+            (lo.map(|v| (v * 10.0).round() / 10.0), hi.map(|v| (v * 10.0).round() / 10.0))
+        };
+        let sweep = |start, arc, step, pitch| Sweep { placement: Affine::IDENTITY, pitch, step, start, arc };
+        // the bounds of Vectorworks' STL export of the samples
+        let (quarter, closed) = sweep(0.0, 90.0, 15.0, 0.0).rings(&profile);
+        assert_eq!((quarter.len(), closed), (7, false));
+        assert_eq!(bounds(&quarter), ([500.0, 0.0, 0.0], [1000.0, 300.0, 500.0]));
+        let (partial, _) = sweep(30.0, 200.0, 10.0, 0.0).rings(&profile);
+        assert_eq!(bounds(&partial), ([117.0, 0.0, -500.0], [1000.0, 300.0, 433.0]));
+        let (pitched, closed) = sweep(0.0, 720.0, 15.0, 400.0).rings(&profile);
+        assert_eq!((bounds(&pitched), closed), (([0.0, 0.0, -500.0], [1000.0, 1100.0, 500.0]), false));
+        let (full, closed) = sweep(0.0, 360.0, 15.0, 0.0).rings(&profile);
+        assert_eq!((full.len(), closed), (24, true));
+    }
+
+    #[test]
+    fn poly_mesh_of_one_triangle_and_one_quad() {
+        let points: [P3; 4] = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]];
+        let mut b = record(85, 0x9c, &[]);
+        for (at, n) in [(0x8c, 4u32), (0x90, 7), (0x94, 2), (0x98, 0)] {
+            b[at..at + 4].copy_from_slice(&n.to_le_bytes());
+        }
+        b.extend(points.iter().flatten().flat_map(|c| c.to_le_bytes()));
+        b.extend([1u32, 2, 3, 1, 2, 3, 4].iter().flat_map(|c| c.to_le_bytes()));
+        b.extend([3u32, 0, 4, 3].iter().flat_map(|c| c.to_le_bytes()));
+        let (positions, faces) = poly_mesh(&rec(&b)).unwrap();
+        assert_eq!(positions, points);
+        assert_eq!(faces, [vec![0, 1, 2], vec![0, 1, 2, 3]]);
+        // a corner number past the points is not a mesh
+        let at = 0x9c + 4 * 24;
+        b[at..at + 4].copy_from_slice(&9u32.to_le_bytes());
+        assert!(poly_mesh(&rec(&b)).is_none());
     }
 
     #[test]

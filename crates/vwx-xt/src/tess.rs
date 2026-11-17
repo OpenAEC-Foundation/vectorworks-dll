@@ -40,6 +40,12 @@ pub struct Mesh {
     pub approximate: usize,
     /// Faces that gave no triangles.
     pub skipped: usize,
+    /// The node type of the curve of each edge use that was drawn straight because curves of
+    /// that kind are not followed (0: the edge has no curve).
+    pub straight_edges: Vec<u16>,
+    /// The node type of the surface of each face counted in `approximate` (0: no surface), and
+    /// why it was not triangulated on its surface.
+    pub approximate_surfaces: Vec<(u16, &'static str)>,
 }
 
 /// The triangles of every face in `file`.
@@ -48,21 +54,19 @@ pub fn tessellate(file: &File) -> Mesh {
     for (_, face) in file.of_type(code::FACE) {
         mesh.faces += 1;
         let before = mesh.triangles.len();
-        let loops = face_loops(file, face);
+        let loops = face_loops(file, face, &mut mesh.straight_edges);
         match Surface::load(file, face.ptr("surface")) {
             Some(s) if s.kind == surface::Kind::Plane => {
                 let normal = mul(s.frame.z, face_sign(face, &s));
                 flat(&mut mesh, &loops, Some(normal));
             }
             Some(s) => {
-                if !curved(&mut mesh, &loops, &s, face_sign(face, &s)) {
-                    mesh.approximate += 1;
-                    flat(&mut mesh, &loops, None);
+                if let Err(why) = curved(&mut mesh, &loops, &s, face_sign(face, &s)) {
+                    approximate(&mut mesh, file, face, &loops, why);
                 }
             }
             None => {
-                mesh.approximate += 1;
-                flat(&mut mesh, &loops, None);
+                approximate(&mut mesh, file, face, &loops, "the surface is not evaluated");
             }
         }
         if mesh.triangles.len() == before {
@@ -72,17 +76,24 @@ pub fn tessellate(file: &File) -> Mesh {
     mesh
 }
 
+/// Fills a face flat between its loops, for a surface that is not evaluated.
+fn approximate(mesh: &mut Mesh, file: &File, face: &Node, loops: &[Vec<P3>], why: &'static str) {
+    mesh.approximate += 1;
+    mesh.approximate_surfaces.push((file.node(face.ptr("surface")).map_or(0, Node::code), why));
+    flat(mesh, loops, None);
+}
+
 fn vertex_point(file: &File, vertex: u32) -> Option<P3> {
     file.node(file.node(vertex)?.ptr("point"))?.vector("pvec")
 }
 
 /// The loops of a face as rings of points (the last point is not the first again).
-fn face_loops(file: &File, face: &Node) -> Vec<Vec<P3>> {
+fn face_loops(file: &File, face: &Node, straight: &mut Vec<u16>) -> Vec<Vec<P3>> {
     let mut out = Vec::new();
     let mut l = face.ptr("loop");
     let mut seen = 0;
     while let Some(lp) = file.node(l) {
-        if let Some(ring) = loop_points(file, lp).and_then(clean) {
+        if let Some(ring) = loop_points(file, lp, straight).and_then(clean) {
             out.push(ring);
         }
         l = lp.ptr("next");
@@ -108,7 +119,7 @@ fn clean(mut ring: Vec<P3>) -> Option<Vec<P3>> {
     (ring.len() >= 3).then_some(ring)
 }
 
-fn loop_points(file: &File, lp: &Node) -> Option<Vec<P3>> {
+fn loop_points(file: &File, lp: &Node, straight: &mut Vec<u16>) -> Option<Vec<P3>> {
     let first = lp.ptr("fin");
     let mut ring = Vec::new();
     let mut f = first;
@@ -120,6 +131,10 @@ fn loop_points(file: &File, lp: &Node) -> Option<Vec<P3>> {
             0 => fin.ptr("curve"),
             c => c,
         };
+        let (shape, followed) = curve::shape(file, curve);
+        if !followed {
+            straight.push(shape);
+        }
         let end = vertex_point(file, fin.ptr("vertex"));
         let start = file.node(fin.ptr("backward")).and_then(|b| vertex_point(file, b.ptr("vertex")));
         match end {
@@ -234,7 +249,14 @@ fn wrap(delta: f64, period: f64) -> f64 {
 /// A loop in the parameters of `s`, `u` (and `v` on a torus) continuous along it, and how many
 /// times it goes around in `u` and in `v`.
 fn unwrap(s: &Surface, points: &[P3]) -> (Vec<P2>, i32, i32) {
-    let mut uv: Vec<P2> = points.iter().map(|p| s.invert(*p)).collect();
+    // each point searched from the one before it (a B-surface is searched, not solved)
+    let mut uv: Vec<P2> = Vec::with_capacity(points.len());
+    for p in points {
+        uv.push(match uv.last() {
+            Some(last) => s.invert_near(*p, *last),
+            None => s.invert(*p),
+        });
+    }
     let singular: Vec<bool> = points.iter().map(|p| s.singular(*p)).collect();
     // at a pole or apex u is that of a neighbour
     if let Some(first) = singular.iter().position(|x| !x) {
@@ -262,22 +284,31 @@ fn unwrap(s: &Surface, points: &[P3]) -> (Vec<P2>, i32, i32) {
     (uv, turns[0], turns[1])
 }
 
-/// Triangles of a face of an analytic curved surface. False when the face is of a shape this
-/// does not handle (the caller then fills it flat).
-fn curved(mesh: &mut Mesh, loops: &[Vec<P3>], s: &Surface, sign: f64) -> bool {
-    let period = TAU;
+/// Triangles of a face of a curved surface. An error says why the face is of a shape this does
+/// not handle (the caller then fills it flat).
+///
+/// Loops may go around in u (a cylinder) or in v (the tube of a torus), not both: the work is
+/// done in (a, b), which is (u, v) or, when loops go around in v, (v, u).
+fn curved(mesh: &mut Mesh, loops: &[Vec<P3>], s: &Surface, sign: f64) -> Result<(), &'static str> {
+    let unwrapped: Vec<(Vec<P2>, i32, i32)> = loops.iter().map(|points| unwrap(s, points)).collect();
+    let (in_u, in_v) = (unwrapped.iter().any(|l| l.1 != 0), unwrapped.iter().any(|l| l.2 != 0));
+    if in_u && in_v {
+        return Err("loops go around in u and in v");
+    }
+    let swap = in_v;
+    let period = if swap { s.period_v() } else { s.period_u() }.unwrap_or(TAU);
     let mut plain: Vec<Ring> = Vec::new();
     let mut around: Vec<(Ring, i32)> = Vec::new();
-    for points in loops {
-        let (uv, turns_u, turns_v) = unwrap(s, points);
-        if turns_v != 0 || turns_u.abs() > 1 {
-            return false;
+    for (points, (uv, turns_u, turns_v)) in loops.iter().zip(&unwrapped) {
+        let turns = if swap { *turns_v } else { *turns_u };
+        if turns.abs() > 1 {
+            return Err("a loop goes around more than once");
         }
         let mut ring = Ring::default();
-        for (p, uv) in points.iter().zip(&uv) {
-            ring.push(*uv, Some(*p));
+        for (p, uv) in points.iter().zip(uv) {
+            ring.push(if swap { [uv[1], uv[0]] } else { *uv }, Some(*p));
         }
-        match turns_u {
+        match turns {
             0 => plain.push(ring),
             t => around.push((ring, t)),
         }
@@ -285,7 +316,8 @@ fn curved(mesh: &mut Mesh, loops: &[Vec<P3>], s: &Surface, sign: f64) -> bool {
     // the outside ring
     let outer = match around.len() {
         0 if !plain.is_empty() => {
-            let scale = s.scale(plain[0].corners[0].uv[1]);
+            let scale = s.scale(plain[0].corners[0].uv[usize::from(!swap)]);
+            let scale = if swap { [scale[1], scale[0]] } else { scale };
             let size = |r: &Ring| area2(&r.corners.iter().map(|c| [c.uv[0] * scale[0], c.uv[1] * scale[1]]).collect::<Vec<_>>()).abs();
             let k = (0..plain.len()).max_by(|&a, &b| size(&plain[a]).total_cmp(&size(&plain[b]))).unwrap();
             plain.swap_remove(k)
@@ -293,27 +325,30 @@ fn curved(mesh: &mut Mesh, loops: &[Vec<P3>], s: &Surface, sign: f64) -> bool {
         // no boundary at all: the whole of a closed surface
         0 => match whole(s) {
             Some(ring) => ring,
-            None => return false,
+            None => return Err("no loops on an open surface"),
         },
         1 => {
             let (ring, turns) = around.pop().unwrap();
+            if swap {
+                return Err("one loop around in v");
+            }
             // the face is left of the loop seen from outside: towards larger v when the loop
             // runs towards larger u and the face normal is the natural normal
             let up = (turns > 0) == (sign > 0.0);
             match cap(s, ring, turns, up, period) {
                 Some(ring) => ring,
-                None => return false,
+                None => return Err("one loop around the axis and no pole on that side"),
             }
         }
         2 => {
             let (b, tb) = around.pop().unwrap();
             let (a, ta) = around.pop().unwrap();
             if ta + tb != 0 {
-                return false;
+                return Err("two loops around the axis the same way");
             }
             band(s, a, ta, b, tb, period)
         }
-        _ => return false,
+        _ => return Err("more than two loops around the axis"),
     };
     let mut rings = vec![outer];
     let middle = rings[0].mid_u();
@@ -321,7 +356,11 @@ fn curved(mesh: &mut Mesh, loops: &[Vec<P3>], s: &Surface, sign: f64) -> bool {
         hole.shift_u(period * ((middle - hole.mid_u()) / period).round());
         rings.push(hole);
     }
-    triangulate(mesh, &rings, s, sign)
+    if triangulate(mesh, &rings, s, sign, swap) {
+        Ok(())
+    } else {
+        Err("the loops cross in parameter space")
+    }
 }
 
 /// Closes a loop that goes around the axis: back to the first point a period on, then along the
@@ -356,7 +395,7 @@ fn band(s: &Surface, mut a: Ring, ta: i32, mut b: Ring, tb: i32, period: f64) ->
     close_around(&mut b, tb, period);
     // the two seams, stepped where the surface bends along v
     let seam = |ring: &mut Ring, from: P2, to: P2| {
-        let steps = if s.curved_in_v() { ((to[1] - from[1]).abs() / ARC_STEP).ceil().max(1.0) as usize } else { 1 };
+        let steps = if s.curved_in_v() { (((to[1] - from[1]).abs() / s.step()[1]).ceil().max(1.0) as usize).min(512) } else { 1 };
         for k in 1..steps {
             let t = k as f64 / steps as f64;
             ring.push([from[0] + (to[0] - from[0]) * t, from[1] + (to[1] - from[1]) * t], None);
@@ -373,23 +412,20 @@ fn band(s: &Surface, mut a: Ring, ta: i32, mut b: Ring, tb: i32, period: f64) ->
 
 /// The whole of a closed surface as one ring: a sphere, a torus.
 fn whole(s: &Surface) -> Option<Ring> {
-    let (v0, v1) = match s.kind {
-        surface::Kind::Sphere { .. } => (-TAU / 4.0, TAU / 4.0),
-        surface::Kind::Torus { .. } => (0.0, TAU),
-        _ => return None,
-    };
-    let steps = (TAU / ARC_STEP).round() as usize;
+    let [(u0, u1), (v0, v1)] = s.domain()?;
+    let step = s.step();
     let mut ring = Ring::default();
-    let side = |ring: &mut Ring, from: P2, to: P2| {
+    let mut side = |from: P2, to: P2| {
+        let steps = (((to[0] - from[0]) / step[0]).abs().max(((to[1] - from[1]) / step[1]).abs()).round() as usize).clamp(1, 512);
         for k in 0..steps {
             let t = k as f64 / steps as f64;
             ring.push([from[0] + (to[0] - from[0]) * t, from[1] + (to[1] - from[1]) * t], None);
         }
     };
-    side(&mut ring, [0.0, v0], [TAU, v0]);
-    side(&mut ring, [TAU, v0], [TAU, v1]);
-    side(&mut ring, [TAU, v1], [0.0, v1]);
-    side(&mut ring, [0.0, v1], [0.0, v0]);
+    side([u0, v0], [u1, v0]);
+    side([u1, v0], [u1, v1]);
+    side([u1, v1], [u0, v1]);
+    side([u0, v1], [u0, v0]);
     Some(ring)
 }
 
@@ -411,7 +447,9 @@ fn inside(rings: &[Vec<P2>], p: P2) -> bool {
 /// constrained Delaunay triangulation of the rings, with points inside where the surface bends
 /// along both parameters. The edges of the rings stay as they are, so neighbouring faces share
 /// their points.
-fn triangulate(mesh: &mut Mesh, rings: &[Ring], s: &Surface, sign: f64) -> bool {
+///
+/// The corners are in (a, b): (u, v), or with `swap` (v, u).
+fn triangulate(mesh: &mut Mesh, rings: &[Ring], s: &Surface, sign: f64, swap: bool) -> bool {
     use spade::{ConstrainedDelaunayTriangulation, Point2, Triangulation};
     let count: usize = rings.iter().map(|r| r.corners.len()).sum();
     if count < 3 {
@@ -420,8 +458,10 @@ fn triangulate(mesh: &mut Mesh, rings: &[Ring], s: &Surface, sign: f64) -> bool 
     if rings.iter().flat_map(|r| &r.corners).any(|c| !c.uv[0].is_finite() || !c.uv[1].is_finite()) {
         return false;
     }
-    let mean_v = rings.iter().flat_map(|r| &r.corners).map(|c| c.uv[1]).sum::<f64>() / count as f64;
+    let uv_of = |ab: P2| if swap { [ab[1], ab[0]] } else { ab };
+    let mean_v = rings.iter().flat_map(|r| &r.corners).map(|c| uv_of(c.uv)[1]).sum::<f64>() / count as f64;
     let scale = s.scale(mean_v).map(|k| k.max(1e-12));
+    let scale = uv_of(scale);
     let flat = |uv: P2| [uv[0] * scale[0], uv[1] * scale[1]];
     let outlines: Vec<Vec<P2>> = rings.iter().map(|r| r.corners.iter().map(|c| flat(c.uv)).collect()).collect();
     let mut cdt = ConstrainedDelaunayTriangulation::<Point2<f64>>::new();
@@ -451,7 +491,7 @@ fn triangulate(mesh: &mut Mesh, rings: &[Ring], s: &Surface, sign: f64) -> bool 
         }
     }
     // points inside, a step apart, where the surface bends along v as well as along u
-    if s.curved_in_v() {
+    if swap || s.curved_in_v() {
         let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
         for c in rings.iter().flat_map(|r| &r.corners) {
             for k in 0..2 {
@@ -459,7 +499,8 @@ fn triangulate(mesh: &mut Mesh, rings: &[Ring], s: &Surface, sign: f64) -> bool 
                 hi[k] = hi[k].max(c.uv[k]);
             }
         }
-        let steps = [0, 1].map(|k| ((hi[k] - lo[k]) / ARC_STEP).ceil().max(1.0) as usize);
+        let step = uv_of(s.step());
+        let steps = [0, 1].map(|k| ((hi[k] - lo[k]) / step[k]).ceil().max(1.0) as usize);
         if steps[0] * steps[1] <= MAX_FACE_TRIANGLES {
             for i in 1..steps[0] {
                 for j in 1..steps[1] {
@@ -473,8 +514,9 @@ fn triangulate(mesh: &mut Mesh, rings: &[Ring], s: &Surface, sign: f64) -> bool 
     }
     let base = mesh.positions.len() as u32;
     for c in &corners {
-        mesh.positions.push(c.exact.unwrap_or_else(|| s.eval(c.uv[0], c.uv[1])));
-        mesh.normals.push(mul(s.normal(c.uv[0], c.uv[1]), sign));
+        let [u, v] = uv_of(c.uv);
+        mesh.positions.push(c.exact.unwrap_or_else(|| s.eval(u, v)));
+        mesh.normals.push(mul(s.normal(u, v), sign));
     }
     let before = mesh.triangles.len();
     for face in cdt.inner_faces() {
@@ -512,7 +554,7 @@ mod tests {
     }
 
     fn upright(kind: Kind) -> Surface {
-        Surface { kind, frame: Frame::new([0.0; 3], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]), positive: true }
+        Surface { kind, frame: Frame::new([0.0; 3], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]), positive: true, nurbs: None }
     }
 
     fn area(mesh: &Mesh) -> f64 {
@@ -558,7 +600,7 @@ mod tests {
         let s = upright(Kind::Cylinder { radius: 0.5 });
         // seen from outside the lower circle runs towards larger u, the upper one back
         let mut mesh = Mesh::default();
-        assert!(curved(&mut mesh, &[circle(0.0, 0.5, false), circle(2.0, 0.5, true)], &s, 1.0));
+        assert_eq!(curved(&mut mesh, &[circle(0.0, 0.5, false), circle(2.0, 0.5, true)], &s, 1.0), Ok(()));
         // the two circles have their points at the same angles: the 32-sided prism
         let side = 2.0 * 0.5 * (TAU / 64.0).sin();
         assert!((area(&mesh) - 32.0 * side * 2.0).abs() < 1e-9, "{}", area(&mesh));
@@ -573,7 +615,7 @@ mod tests {
         let z = 0.5f64;
         let ring = circle(z, (1.0 - z * z).sqrt(), false);
         let mut mesh = Mesh::default();
-        assert!(curved(&mut mesh, &[ring], &s, 1.0));
+        assert_eq!(curved(&mut mesh, &[ring], &s, 1.0), Ok(()));
         // the cap above z = 0.5 has area 2 pi r h = pi
         assert!((area(&mesh) / (TAU / 2.0) - 1.0).abs() < 0.05, "{}", area(&mesh));
         assert!(mesh.positions.iter().any(|p| dist(*p, [0.0, 0.0, 1.0]) < 1e-9));
@@ -585,10 +627,71 @@ mod tests {
     fn sphere_without_loops_is_whole() {
         let s = upright(Kind::Sphere { radius: 2.0 });
         let mut mesh = Mesh::default();
-        assert!(curved(&mut mesh, &[], &s, 1.0));
+        assert_eq!(curved(&mut mesh, &[], &s, 1.0), Ok(()));
         assert!((area(&mesh) / (2.0 * TAU * 4.0) - 1.0).abs() < 0.03, "{}", area(&mesh));
         assert!(mesh.positions.iter().all(|p| (len(*p) - 2.0).abs() < 1e-9));
         assert!(consistent(&mesh, |p| p));
+    }
+
+    #[test]
+    fn face_on_a_b_surface_follows_the_surface() {
+        // the quarter cylinder (radius 1, height 2), bounded by its own four edges
+        let n = std::rc::Rc::new(crate::nurbs::tests::quarter_cylinder());
+        let s = Surface { kind: Kind::Nurbs, frame: Frame::new([0.0; 3], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]), positive: true, nurbs: Some(n.clone()) };
+        let mut ring = Vec::new();
+        for k in 0..8 {
+            ring.push(n.eval(k as f64 / 8.0, 0.0));
+        }
+        ring.push(n.eval(1.0, 0.0));
+        for k in (0..=8).rev() {
+            ring.push(n.eval(k as f64 / 8.0, 1.0));
+        }
+        let mut mesh = Mesh::default();
+        assert_eq!(curved(&mut mesh, &[ring], &s, 1.0), Ok(()));
+        assert!(mesh.positions.iter().all(|p| (p[0].hypot(p[1]) - 1.0).abs() < 1e-9));
+        // a quarter of 2 pi r h
+        assert!((area(&mesh) / (TAU / 2.0) - 1.0).abs() < 0.01, "{}", area(&mesh));
+        assert!(consistent(&mesh, |p| [p[0], p[1], 0.0]));
+        // and the surface on its own is the same patch
+        let mut whole_patch = Mesh::default();
+        assert_eq!(curved(&mut whole_patch, &[], &s, 1.0), Ok(()));
+        assert!((area(&whole_patch) / (TAU / 2.0) - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn band_around_the_tube_of_a_torus() {
+        // the torus with major radius 2 and minor radius 0.5 about z; a face between the two
+        // circles around the tube at u = 0 and u = 1 (they go around in v)
+        let s = upright(Kind::Torus { major: 2.0, minor: 0.5 });
+        let tube = |u: f64, reverse: bool| {
+            let mut ring: Vec<P3> = (0..32).map(|k| s.eval(u, k as f64 / 32.0 * TAU)).collect();
+            if reverse {
+                ring.reverse();
+            }
+            ring
+        };
+        let mut mesh = Mesh::default();
+        assert_eq!(curved(&mut mesh, &[tube(0.0, true), tube(1.0, false)], &s, 1.0), Ok(()));
+        // a part of the torus of 1 radian: area (2 pi b)(a * 1)
+        assert!((area(&mesh) / (TAU * 0.5 * 2.0) - 1.0).abs() < 0.03, "{}", area(&mesh));
+        let on_torus = |p: &P3| ((p[0].hypot(p[1]) - 2.0).hypot(p[2]) - 0.5).abs() < 1e-9;
+        assert!(mesh.positions.iter().all(on_torus));
+        // away from the centre line of the tube
+        assert!(consistent(&mesh, |p| {
+            let r = p[0].hypot(p[1]);
+            [p[0] * (1.0 - 2.0 / r), p[1] * (1.0 - 2.0 / r), p[2]]
+        }));
+    }
+
+    #[test]
+    fn faces_this_cannot_follow_say_why() {
+        let s = upright(Kind::Cylinder { radius: 0.5 });
+        let mut mesh = Mesh::default();
+        // one circle on a cylinder bounds nothing: a cylinder has no pole
+        assert_eq!(curved(&mut mesh, &[circle(0.0, 0.5, false)], &s, 1.0), Err("one loop around the axis and no pole on that side"));
+        assert_eq!(curved(&mut mesh, &[circle(0.0, 0.5, false), circle(2.0, 0.5, false)], &s, 1.0), Err("two loops around the axis the same way"));
+        assert_eq!(curved(&mut mesh, &[], &s, 1.0), Err("no loops on an open surface"));
+        assert!(mesh.triangles.is_empty());
     }
 
     #[test]
@@ -598,7 +701,7 @@ mod tests {
         let s = upright(Kind::Cone { radius: 1.0, tan: 1.0 });
         let mut mesh = Mesh::default();
         // natural normal of a cone points inward; a face seen from outside has the other sign
-        assert!(curved(&mut mesh, &[circle(0.0, 1.0, false)], &s, -1.0));
+        assert_eq!(curved(&mut mesh, &[circle(0.0, 1.0, false)], &s, -1.0), Ok(()));
         assert!(mesh.positions.iter().any(|p| dist(*p, [0.0, 0.0, 1.0]) < 1e-9));
         // lateral area pi r l = pi sqrt(2)
         assert!((area(&mesh) / (TAU / 2.0 * 2f64.sqrt()) - 1.0).abs() < 0.04, "{}", area(&mesh));

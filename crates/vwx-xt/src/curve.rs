@@ -6,13 +6,15 @@
 //! the edge in its own direction or against it.
 //!
 //! Lines need no points between their ends. Circles and ellipses are stepped by angle. B-curves
-//! are evaluated; intersection curves come with their own points (the chart). For the kinds not
+//! are evaluated; intersection curves come with their own points (the chart); a curve given in
+//! the parameters of a surface (SP-curve) is evaluated on that surface. For the kinds not
 //! evaluated the edge is a straight segment.
 
 use std::f64::consts::TAU;
 
 use crate::geom::{add, dist, mul, sub, Frame, P3};
 use crate::parse::{File, Node, Value};
+use crate::surface::Surface;
 
 /// Largest angle between two points on a circle.
 pub const ARC_STEP: f64 = TAU / 32.0;
@@ -25,6 +27,19 @@ const ELLIPSE: u16 = 32;
 const INTERSECTION: u16 = 38;
 const TRIMMED_CURVE: u16 = 133;
 const B_CURVE: u16 = 134;
+const SP_CURVE: u16 = 137;
+
+/// The node type of the curve that gives node `curve` its shape (a trimmed curve is followed
+/// to its basis curve), and whether [`between`] follows that kind; other kinds are drawn as a
+/// straight edge.
+pub fn shape(file: &File, curve: u32) -> (u16, bool) {
+    let mut node = file.node(curve);
+    while let Some(n) = node.filter(|n| n.code() == TRIMMED_CURVE) {
+        node = file.node(n.ptr("basis_curve"));
+    }
+    let code = node.map_or(0, Node::code);
+    (code, matches!(code, LINE | CIRCLE | ELLIPSE | B_CURVE | INTERSECTION | SP_CURVE))
+}
 
 /// The points of the curve of node `curve` strictly between `from` and `to`, going along the
 /// edge when `forward`. With `from` and `to` `None` (a ring edge, without vertices): the whole
@@ -52,6 +67,8 @@ pub fn between(file: &File, curve: u32, from: Option<P3>, to: Option<P3>, forwar
             let points: Vec<P3> = file.node(n.ptr("chart")).map(|c| c.many("Hvec").iter().filter_map(vector).collect()).unwrap_or_default();
             along(&points, from, to, increasing)
         }
+        // a curve in the parameters of a surface (the edge of a face with a tolerance)
+        SP_CURVE => along(&surface_curve_points(file, n).unwrap_or_default(), from, to, increasing),
         _ => Vec::new(),
     }
 }
@@ -98,8 +115,9 @@ fn conic(n: &Node, from: Option<P3>, to: Option<P3>, increasing: bool) -> Option
     Some(range.map(|k| at(start + sign * sweep * k as f64 / steps as f64)).collect())
 }
 
-/// The part of the polyline `points` strictly between the points nearest to `from` and `to`,
-/// in the order of the polyline when `increasing`. A closed polyline is followed past its end.
+/// The part of the polyline `points` strictly between the points nearest to `from` and `to`.
+/// A closed polyline is followed in its own order when `increasing`, else against it, past its
+/// end; on an open one there is only one way from the one point to the other.
 fn along(points: &[P3], from: Option<P3>, to: Option<P3>, increasing: bool) -> Vec<P3> {
     if points.len() < 2 {
         return Vec::new();
@@ -116,11 +134,11 @@ fn along(points: &[P3], from: Option<P3>, to: Option<P3>, increasing: bool) -> V
     let (a, b) = (nearest(from), nearest(to));
     let n = points.len() - usize::from(closed);
     let mut out = Vec::new();
-    let step = |k: usize| if increasing { (k + 1) % n } else { (k + n - 1) % n };
-    let wraps = closed && (if increasing { b <= a } else { b >= a });
-    if !wraps && (if increasing { b <= a } else { b >= a }) {
+    if a == b && !closed {
         return out;
     }
+    let increasing = if closed { increasing } else { a < b };
+    let step = |k: usize| if increasing { (k + 1) % n } else { (k + n - 1) % n };
     let mut k = step(a.min(n - 1));
     let end = b.min(n - 1);
     let mut guard = 0;
@@ -227,6 +245,17 @@ fn bspline_points(file: &File, b_curve: &Node) -> Option<Vec<P3>> {
     Some(nurbs.parameters().into_iter().map(|t| nurbs.eval(t)).map(|p| [p[0], p[1], p[2]]).collect())
 }
 
+/// The points an `SP_CURVE` node is drawn with: its B-curve gives (u, v), its surface the
+/// points.
+fn surface_curve_points(file: &File, sp_curve: &Node) -> Option<Vec<P3>> {
+    let surface = Surface::load(file, sp_curve.ptr("surface"))?;
+    let nurbs = Nurbs::curve(file, file.node(file.node(sp_curve.ptr("b_curve"))?.ptr("nurbs"))?)?;
+    if nurbs.dim - usize::from(nurbs.rational) != 2 {
+        return None;
+    }
+    Some(nurbs.parameters().into_iter().map(|t| nurbs.eval(t)).map(|uv| surface.eval(uv[0], uv[1])).collect())
+}
+
 /// A point between two others, for callers that step along straight edges.
 pub fn lerp(a: P3, b: P3, t: f64) -> P3 {
     add(a, mul(sub(b, a), t))
@@ -267,8 +296,9 @@ mod tests {
         let (a, b) = (Some([1.0, 0.0, 0.0]), Some([4.0, 0.0, 0.0]));
         assert_eq!(along(&line, a, b, true), [[2.0, 0.0, 0.0], [3.0, 0.0, 0.0]]);
         assert_eq!(along(&line, b, a, false), [[3.0, 0.0, 0.0], [2.0, 0.0, 0.0]]);
-        // against the direction of an open curve there is nothing between
-        assert!(along(&line, b, a, true).is_empty());
+        // an open curve has one way from the one point to the other, whatever the direction asked
+        assert_eq!(along(&line, b, a, true), [[3.0, 0.0, 0.0], [2.0, 0.0, 0.0]]);
+        assert!(along(&line, a, a, true).is_empty());
     }
 
     #[test]

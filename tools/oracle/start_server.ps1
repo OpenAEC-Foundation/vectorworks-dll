@@ -34,7 +34,13 @@ function Find-Item([string[]]$names) {
     foreach ($try in 1..20) {
         foreach ($b in @(Bars)) {
             foreach ($item in [Msaa]::Items($b)) {
-                foreach ($n in $names) { if ($item.Replace('&', '').StartsWith($n)) { return @($b, $n) } }
+                foreach ($n in $names) {
+                    if ($item.Replace('&', '').StartsWith($n)) {
+                        # a menu that has just opened does not take a click at once
+                        Start-Sleep -Milliseconds 500
+                        return @($b, $n)
+                    }
+                }
             }
         }
         Start-Sleep -Milliseconds 150
