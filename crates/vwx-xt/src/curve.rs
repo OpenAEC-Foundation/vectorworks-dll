@@ -168,9 +168,19 @@ fn along(points: &[P3], from: Option<P3>, to: Option<P3>, increasing: bool) -> V
 /// own. The `sense` of the curve node plays no part: the parameter is the natural one.
 #[derive(Debug, Clone)]
 pub enum Path {
-    Line { point: P3, direction: P3 },
-    Conic { frame: Frame, a: f64, b: f64 },
+    Line {
+        point: P3,
+        direction: P3,
+    },
+    Conic {
+        frame: Frame,
+        a: f64,
+        b: f64,
+    },
     Spline(Nurbs),
+    /// The points an intersection curve comes with (its chart), straight between them; the
+    /// parameter is the number of the point.
+    Chain(Vec<P3>),
 }
 
 impl Path {
@@ -193,6 +203,11 @@ impl Path {
                 let nurbs = Nurbs::curve(file, file.node(n.ptr("nurbs"))?)?;
                 (nurbs.dim == 3 + usize::from(nurbs.rational) && nurbs.range().is_some_and(|(lo, hi)| hi > lo)).then_some(Path::Spline(nurbs))
             }
+            INTERSECTION => {
+                let mut points: Vec<P3> = file.node(n.ptr("chart"))?.many("Hvec").iter().filter_map(vector).filter(|p| p.iter().all(|c| c.is_finite())).collect();
+                points.dedup();
+                (points.len() >= 2).then_some(Path::Chain(points))
+            }
             _ => None,
         }
     }
@@ -205,6 +220,11 @@ impl Path {
                 let p = nurbs.eval(t);
                 [p[0], p[1], p[2]]
             }
+            // (beyond its ends it goes on straight)
+            Path::Chain(points) => {
+                let i = (t.floor().max(0.0) as usize).min(points.len() - 2);
+                lerp(points[i], points[i + 1], t - i as f64)
+            }
         }
     }
 
@@ -214,6 +234,7 @@ impl Path {
             Path::Line { .. } => None,
             Path::Conic { .. } => Some((0.0, TAU)),
             Path::Spline(nurbs) => nurbs.range(),
+            Path::Chain(points) => Some((0.0, (points.len() - 1) as f64)),
         }
     }
 
@@ -230,6 +251,7 @@ impl Path {
             Path::Line { .. } => vec![0.0, 1.0],
             Path::Conic { .. } => (0..=32).map(|k| ARC_STEP * k as f64).collect(),
             Path::Spline(nurbs) => nurbs.parameters(),
+            Path::Chain(points) => (0..points.len()).map(|k| k as f64).collect(),
         }
     }
 }
@@ -390,6 +412,8 @@ mod tests {
         assert!(dist(ellipse.eval(TAU / 4.0), [0.0, 1.0, 0.0]) < 1e-12);
         assert_eq!(ellipse.period(), Some(TAU));
         assert_eq!(ellipse.parameters().len(), 33);
+        let chain = Path::Chain(vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 2.0, 0.0]]);
+        assert_eq!((chain.eval(0.5), chain.eval(1.5), chain.eval(3.0), chain.range()), ([0.5, 0.0, 0.0], [1.0, 1.0, 0.0], [1.0, 4.0, 0.0], Some((0.0, 2.0))));
     }
 
     #[test]

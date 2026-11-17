@@ -11,7 +11,9 @@
 //!   it and neighbouring faces share their points;
 //! - a face of a **B-surface**, a **swept** or a **spun surface** likewise, with its parameters
 //!   searched from point to point along each loop;
-//! - a face of any **other surface** (blend, offset) is not evaluated yet: its loops are filled
+//! - a face of a **blend** (a rolling ball along an edge) likewise, by its spine and the two
+//!   surfaces the ball touches;
+//! - a face of an **offset surface** is not evaluated yet: its loops are filled
 //!   as if they lay in one plane, and counted as approximate. So is a face whose loops could
 //!   not be laid out in the parameters of its surface, with the reason.
 //!
@@ -393,6 +395,23 @@ fn curved(mesh: &mut Mesh, loops: &[Vec<P3>], s: &Surface, sign: f64) -> Result<
             t => around.push((ring, t)),
         }
     }
+    // Which way a blend faces follows from its loops, not from its senses (the reference says
+    // how its parameters run, but not so that every blend of the corpus comes out the right
+    // way): the face is left of its loops, so its outer loop runs counter-clockwise in (u, v)
+    // when the face normal is the natural normal; and of two loops around, the one that runs
+    // towards larger u has the face at larger v.
+    let sign = if s.kind == surface::Kind::Blend {
+        let mean_b = |r: &Ring| r.corners.iter().map(|c| c.uv[1]).sum::<f64>() / r.corners.len().max(1) as f64;
+        let derived = match around.as_slice() {
+            [] => plain.iter().map(|r| area2(&r.corners.iter().map(|c| c.uv).collect::<Vec<_>>())).max_by(|a, b| a.abs().total_cmp(&b.abs())).filter(|a| *a != 0.0).map(f64::signum),
+            [(a, ta), (b, _)] => Some(if (mean_b(a) < mean_b(b)) == (*ta > 0) { 1.0 } else { -1.0 }),
+            _ => None,
+        };
+        // (in (v, u) the turn is the other way round)
+        derived.map_or(sign, |d| if swap { -d } else { d })
+    } else {
+        sign
+    };
     // the outside ring
     let outer = match around.len() {
         0 if !plain.is_empty() => {

@@ -323,8 +323,10 @@ their plane; every other face in the parameters (u, v) of its surface (a constra
 triangulation of the loops, with points inside where the surface bends both ways), so that
 neighbouring faces share the points of their common edge. Surfaces that are evaluated: plane,
 cylinder, cone, sphere, torus, B-surface (NURBS), swept surface (a curve moved along a
-direction) and spun surface (a curve turned about an axis). Blend and offset surfaces are not:
-their faces are filled flat between their edges and counted as approximate.
+direction), spun surface (a curve turned about an axis) and blend (a ball rolled along an edge:
+at each point of its spine, the path of the centre of the ball, a circular arc from where the
+ball touches the one supporting surface to where it touches the other). Offset surfaces are
+not: their faces are filled flat between their edges and counted as approximate.
 
 Of the 641 490 faces in the corpus (plane 84 %, cylinder 7 %, B-surface 3 %, swept 1 %, the
 others under 1 % each) 4 851 are filled flat: 2 194 on blend and 199 on offset surfaces, the
@@ -344,7 +346,11 @@ Where the data is not as the reference prints it, found on corpus files:
   other). A face may lie beyond the range of its surface: there the surface goes on straight.
   A closed direction is followed round;
 - a curve in the parameters of a surface (SP-curve) that is straight there is still curved in
-  space: a half circle on a cylinder is one segment of degree 1.
+  space: a half circle on a cylinder is one segment of degree 1;
+- **blend**: which way a blend faces is taken from its loops (the face is left of them), not
+  from the senses of its nodes: no rule of senses (of the spine, the supporting surfaces, the
+  signs of the ranges) turned every blend of a corpus file the right way, the loops turn all
+  but a few. A blend with range (0, 0) is an edge another blend's ball rolls along.
 
 An orientation check that needs no reference: in a closed skin every edge between two triangles
 is used once in each direction. `vwx xt` counts the edges used so, those used twice the same way

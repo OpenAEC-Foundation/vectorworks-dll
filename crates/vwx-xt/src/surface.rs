@@ -8,7 +8,10 @@
 //! - sphere `C + (X cos u + Y sin u) r cos v + r A sin v`;
 //! - torus `C + (X cos u + Y sin u)(a + b cos v) + b A sin v`;
 //! - swept surface `C(u) + vD`, with `C` its section curve;
-//! - spun surface: `C(u)`, its profile curve, turned about the axis by the angle `v`.
+//! - spun surface: `C(u)`, its profile curve, turned about the axis by the angle `v`;
+//! - blend (a rolling ball along an edge): `u` is that of its spine, the path of the centre of
+//!   the ball; at each `u` a circular arc about the spine, from where the ball touches the
+//!   first supporting surface (`v` = 0) to where it touches the second (`v` = 1).
 //!
 //! The cone is not as the reference prints it (`P - vA + ...`, the mirror image): the corners of
 //! 58 cone faces of a corpus file lie on the surface above and off the printed one, and the
@@ -24,6 +27,9 @@ use crate::code;
 const B_SURFACE: u16 = 124;
 const SWEPT_SURF: u16 = 67;
 const SPUN_SURF: u16 = 68;
+const BLENDED_EDGE: u16 = 56;
+/// How deep surfaces made from surfaces are followed (a blend on a blend).
+const MAX_DEPTH: usize = 3;
 use std::rc::Rc;
 
 use crate::curve::{Path, ARC_STEP};
@@ -54,6 +60,9 @@ pub enum Kind {
     Swept,
     /// A curve turned about the main axis of the frame: see [`Surface::profile`].
     Spun,
+    /// A rolling ball blend: its spine is [`Surface::profile`], which has its two supporting
+    /// surfaces.
+    Blend,
 }
 
 /// The curve a swept or spun surface is made from, with what is needed to search it.
@@ -69,6 +78,10 @@ pub struct Profile {
     /// the mean distance of the profile to the axis.
     limits: [Option<f64>; 2],
     radius: f64,
+    /// A blend: the two surfaces the ball touches, and the angle of its arc at the middle of
+    /// the spine.
+    supports: Vec<Surface>,
+    angle: f64,
 }
 
 impl Profile {
@@ -79,7 +92,7 @@ impl Profile {
         if samples.len() < 2 || !span.is_finite() || span <= 0.0 || !length.is_finite() || length <= 0.0 {
             return None;
         }
-        Some(Profile { path, step: span / (samples.len() - 1) as f64, speed: length / span, samples, limits: [None; 2], radius: 1.0 })
+        Some(Profile { path, step: span / (samples.len() - 1) as f64, speed: length / span, samples, limits: [None; 2], radius: 1.0, supports: Vec::new(), angle: 1.0 })
     }
 }
 
@@ -110,6 +123,10 @@ pub struct Surface {
 impl Surface {
     /// The surface of node `index`; `None` for the kinds not evaluated (blends, offsets).
     pub fn load(file: &File, index: u32) -> Option<Surface> {
+        Surface::load_within(file, index, 0)
+    }
+
+    fn load_within(file: &File, index: u32, depth: usize) -> Option<Surface> {
         let n = file.node(index)?;
         let axes = |origin: &str, axis: &str| Some(Frame::new(n.vector(origin)?, n.vector(axis)?, n.vector("x_axis")?));
         let (kind, frame) = match n.code() {
@@ -137,6 +154,25 @@ impl Surface {
                 let radius = |p: P3| frame.local(p)[0].hypot(frame.local(p)[1]);
                 profile.radius = profile.samples.iter().map(|s| radius(s.1)).sum::<f64>() / profile.samples.len() as f64;
                 return Some(Surface { kind: Kind::Spun, frame, positive: n.positive(), nurbs: None, profile: Some(Rc::new(profile)) });
+            }
+            BLENDED_EDGE if depth < MAX_DEPTH => {
+                let supports: Vec<Surface> = n.many("surface").iter().filter_map(|v| if let Value::Ptr(p) = v { Surface::load_within(file, *p, depth + 1) } else { None }).collect();
+                // the radius of the ball. A blend with none is an edge the ball of another blend
+                // rolls along (a cliff edge): the curve that is its spine
+                let radius = n.many("range").iter().filter_map(|v| if let Value::Real(r) = v { Some(r.abs()) } else { None }).fold(0.0, f64::max);
+                if !radius.is_finite() || (radius > 0.0 && supports.len() != 2) {
+                    return None;
+                }
+                let mut profile = Profile::new(Path::load(file, n.ptr("spine"))?)?;
+                profile.supports = if radius > 0.0 { supports } else { Vec::new() };
+                profile.radius = radius;
+                let frame = Frame::new([0.0; 3], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]);
+                let mut surface = Surface { kind: Kind::Blend, frame, positive: n.positive(), nurbs: None, profile: Some(Rc::new(profile.clone())) };
+                // the angle of the arc, for the steps across it
+                let middle = profile.samples[profile.samples.len() / 2].0;
+                profile.angle = surface.arc(&profile, middle).map_or(TAU / 4.0, |arc| arc.4).max(1e-3);
+                surface.profile = Some(Rc::new(profile));
+                return Some(surface);
             }
             _ => return None,
         };
@@ -191,7 +227,40 @@ impl Surface {
         let l = self.frame.local(p);
         match self.kind {
             Kind::Spun => [l[0].hypot(l[1]), l[2], 0.0],
+            // (a point of a blend comes from the point of the spine nearest to it)
+            Kind::Blend => p,
             _ => [l[0], l[1], 0.0],
+        }
+    }
+
+    /// The arc of a blend at `u` of its spine: its centre, the unit direction to where it
+    /// starts (on the first supporting surface), the unit direction square to that in its
+    /// plane towards its end, its radius and its angle.
+    fn arc(&self, profile: &Profile, u: f64) -> Option<(P3, P3, P3, f64, f64)> {
+        let c = profile.path.eval(u);
+        let foot = |s: &Surface| {
+            let uv = s.invert(c);
+            sub(s.eval(uv[0], uv[1]), c)
+        };
+        let (a, b) = (foot(profile.supports.first()?), foot(profile.supports.get(1)?));
+        let r = dot(a, a).sqrt();
+        if !(r.is_finite() && r > 0.0) {
+            return None;
+        }
+        let e1 = mul(a, 1.0 / r);
+        let across = sub(b, mul(e1, dot(b, e1)));
+        let l = dot(across, across).sqrt();
+        (l > 1e-12 * r).then(|| (c, e1, mul(across, 1.0 / l), r, l.atan2(dot(b, e1))))
+    }
+
+    /// (u, v) of `p` on a blend, given `u`.
+    fn across_blend(&self, profile: &Profile, p: P3, u: f64) -> [f64; 2] {
+        match self.arc(profile, u) {
+            Some((c, e1, e2, _, angle)) => {
+                let d = sub(p, c);
+                [u, dot(d, e2).atan2(dot(d, e1)) / angle]
+            }
+            None => [u, 0.0],
         }
     }
 
@@ -241,6 +310,15 @@ impl Surface {
         if let Some(n) = &self.nurbs {
             return n.eval(u, v);
         }
+        if let (Kind::Blend, Some(profile)) = (self.kind, &self.profile) {
+            return match self.arc(profile, u) {
+                Some((c, e1, e2, r, angle)) => {
+                    let (s, co) = (v * angle).sin_cos();
+                    add(c, add(mul(e1, r * co), mul(e2, r * s)))
+                }
+                None => profile.path.eval(u),
+            };
+        }
         if let Some(profile) = &self.profile {
             let c = profile.path.eval(u);
             return match self.kind {
@@ -264,7 +342,7 @@ impl Surface {
                 let rho = major + minor * v.cos();
                 [rho * c, rho * s, minor * v.sin()]
             }
-            Kind::Nurbs | Kind::Swept | Kind::Spun => [0.0; 3],
+            Kind::Nurbs | Kind::Swept | Kind::Spun | Kind::Blend => [0.0; 3],
         })
     }
 
@@ -277,7 +355,7 @@ impl Surface {
             let h = profile.step * 1e-5;
             let du = sub(self.eval(u + h, v), self.eval(u - h, v));
             let dv = match self.kind {
-                Kind::Spun => sub(self.eval(u, v + 1e-6), self.eval(u, v - 1e-6)),
+                Kind::Spun | Kind::Blend => sub(self.eval(u, v + 1e-6), self.eval(u, v - 1e-6)),
                 _ => self.frame.z,
             };
             return unit(cross(du, dv));
@@ -289,7 +367,7 @@ impl Surface {
             // dP/du × dP/dv = (r + v tan a)(radial - A tan a): outward where the radius is positive
             Kind::Cone { tan, .. } => [c, s, -tan],
             Kind::Sphere { .. } | Kind::Torus { .. } => [v.cos() * c, v.cos() * s, v.sin()],
-            Kind::Nurbs | Kind::Swept | Kind::Spun => [0.0, 0.0, 1.0],
+            Kind::Nurbs | Kind::Swept | Kind::Spun | Kind::Blend => [0.0, 0.0, 1.0],
         }))
     }
 
@@ -298,6 +376,9 @@ impl Surface {
     pub fn invert(&self, p: P3) -> [f64; 2] {
         if let Some(n) = &self.nurbs {
             return n.invert(p);
+        }
+        if let (Kind::Blend, Some(profile)) = (self.kind, &self.profile) {
+            return self.across_blend(profile, p, self.profile_parameter(profile, p, None));
         }
         if let Some(profile) = &self.profile {
             return self.across_profile(profile, p, self.profile_parameter(profile, p, None));
@@ -310,7 +391,7 @@ impl Surface {
             Kind::Cone { .. } => [u, l[2]],
             Kind::Sphere { radius } => [u, (l[2] / radius).clamp(-1.0, 1.0).asin()],
             Kind::Torus { major, .. } => [u, l[2].atan2(l[0].hypot(l[1]) - major)],
-            Kind::Nurbs | Kind::Swept | Kind::Spun => [0.0; 2],
+            Kind::Nurbs | Kind::Swept | Kind::Spun | Kind::Blend => [0.0; 2],
         }
     }
 
@@ -320,6 +401,9 @@ impl Surface {
     pub fn invert_near(&self, p: P3, guess: [f64; 2]) -> [f64; 2] {
         if let Some(n) = &self.nurbs {
             return n.invert_near(p, guess);
+        }
+        if let (Kind::Blend, Some(profile)) = (self.kind, &self.profile) {
+            return self.across_blend(profile, p, self.profile_parameter(profile, p, Some(guess[0])));
         }
         if let Some(profile) = &self.profile {
             let mut uv = self.across_profile(profile, p, self.profile_parameter(profile, p, Some(guess[0])));
@@ -337,7 +421,7 @@ impl Surface {
     pub fn singular(&self, p: P3) -> bool {
         let l = self.frame.local(p);
         let scale = match self.kind {
-            Kind::Plane | Kind::Torus { .. } | Kind::Nurbs | Kind::Swept => return false,
+            Kind::Plane | Kind::Torus { .. } | Kind::Nurbs | Kind::Swept | Kind::Blend => return false,
             Kind::Cylinder { radius } | Kind::Cone { radius, .. } | Kind::Sphere { radius } => radius.abs().max(l[2].abs()),
             Kind::Spun => self.profile.as_ref().map_or(1.0, |p| p.radius).max(l[2].abs()),
         };
@@ -392,18 +476,20 @@ impl Surface {
             Kind::Nurbs => self.nurbs.as_ref().map_or([1.0, 1.0], |n| n.scale()),
             Kind::Swept => [self.profile.as_ref().map_or(1.0, |p| p.speed), 1.0],
             Kind::Spun => self.profile.as_ref().map_or([1.0, 1.0], |p| [p.speed, p.radius.max(1e-12)]),
+            Kind::Blend => self.profile.as_ref().map_or([1.0, 1.0], |p| [p.speed, (p.radius * p.angle).max(1e-12)]),
         }
     }
 
     /// True when the surface bends along `v` as well as along `u`.
     pub fn curved_in_v(&self) -> bool {
-        matches!(self.kind, Kind::Sphere { .. } | Kind::Torus { .. } | Kind::Nurbs | Kind::Spun)
+        matches!(self.kind, Kind::Sphere { .. } | Kind::Torus { .. } | Kind::Nurbs | Kind::Spun | Kind::Blend)
     }
 
     /// The step in `u` and in `v` between points the surface is drawn with.
     pub fn step(&self) -> [f64; 2] {
         if let Some(profile) = &self.profile {
-            return [profile.step, ARC_STEP];
+            // (across a blend v runs from 0 to 1 over the angle of its arc)
+            return [profile.step, if self.kind == Kind::Blend { ARC_STEP / profile.angle } else { ARC_STEP }];
         }
         match &self.nurbs {
             Some(n) => n.step(),
@@ -523,6 +609,28 @@ mod tests {
         assert!(spun.singular(spun.eval(-1.0, 1.0)) && !spun.singular(spun.eval(0.0, 1.0)));
         assert_eq!((spun.pole(0, false), spun.pole(0, true), spun.pole(1, false)), (Some(-1.0), None, None));
         assert_eq!((spun.period_u(), spun.period_v(), swept.period_v()), (None, Some(TAU), None));
+    }
+
+    #[test]
+    fn blend_between_two_planes() {
+        // the floor z = 0 and the wall x = 0, a ball of radius 1 rolled along y in their corner:
+        // its centre runs along the line through (1, 0, 1)
+        let plane = |normal: P3, x: P3| Surface { kind: Kind::Plane, frame: Frame::new([0.0; 3], normal, x), positive: true, nurbs: None, profile: None };
+        let mut profile = Profile::new(Path::Line { point: [1.0, 0.0, 1.0], direction: [0.0, 1.0, 0.0] }).unwrap();
+        profile.supports = vec![plane([0.0, 0.0, 1.0], [1.0, 0.0, 0.0]), plane([1.0, 0.0, 0.0], [0.0, 1.0, 0.0])];
+        profile.radius = 1.0;
+        profile.angle = TAU / 4.0;
+        let blend = Surface { kind: Kind::Blend, frame: Frame::new([0.0; 3], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]), positive: true, nurbs: None, profile: Some(Rc::new(profile)) };
+        // from the floor (v = 0) to the wall (v = 1), a quarter circle about the spine
+        assert!(dist(blend.eval(2.0, 0.0), [1.0, 2.0, 0.0]) < 1e-12 && dist(blend.eval(2.0, 1.0), [0.0, 2.0, 1.0]) < 1e-12);
+        let middle = blend.eval(0.5, 0.5);
+        assert!(dist(middle, [1.0 - 0.5f64.sqrt(), 0.5, 1.0 - 0.5f64.sqrt()]) < 1e-12, "{middle:?}");
+        for (u, v) in [(0.3, 0.2), (-4.0, 0.9), (7.5, 0.5)] {
+            let [iu, iv] = blend.invert(blend.eval(u, v));
+            assert!((iu - u).abs() < 1e-9 && (iv - v).abs() < 1e-9, "{u} {v} -> {iu} {iv}");
+            assert!(dot(blend.normal(u, v), numeric_normal(&blend, u, v)) > 1.0 - 1e-6);
+        }
+        assert_eq!((blend.period_u(), blend.period_v(), blend.curved_in_v()), (None, None, true));
     }
 
     #[test]
