@@ -331,9 +331,9 @@ be laid out in the parameters of its surface is filled flat between its edges an
 approximate.
 
 Of the 641 490 faces in the corpus (plane 84 %, cylinder 7 %, B-surface 3 %, swept 1 %, the
-others under 1 % each) 2 831 are filled flat (0.4 %): 199 on offset surfaces, 174 on blends, the
+others under 1 % each) 2 540 are filled flat (0.4 %): faces on blends that are not followed (174), the
 others faces whose loops could not be laid out in the parameters of their surface (a loop that
-seems to go around more than once, two loops around the axis the same way); 132 give no
+seems to go around more than once, two loops around the axis the same way); 131 give no
 triangles. `Residential New Construction.sta`: all 4 345 faces on their surface.
 
 Where the data is not as the reference prints it, found on corpus files:
