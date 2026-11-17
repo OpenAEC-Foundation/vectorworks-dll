@@ -17,9 +17,11 @@
 //! the solids kept as Parasolid bodies (walls, CSG solids, sweeps, multiple extrudes, NURBS
 //! surfaces). See `docs/ARCHITECTURE.md` for what is open.
 
+pub mod coverage;
 pub mod dmdt;
 pub mod kinds;
 pub mod mesh;
+pub mod objects;
 pub mod palette;
 pub mod plan;
 pub mod raw;

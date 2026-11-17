@@ -2,6 +2,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use serde_json::{json, Value};
+
+mod coverage;
 use vwx_core::{diff, hex, scan, Probe};
 
 const USAGE: &str = "usage:
@@ -13,6 +15,9 @@ const USAGE: &str = "usage:
   vwx mesh <file.vwx> [--obj out.obj]       bounds and triangles of the meshes; writes an OBJ
   vwx xt <file> [--errors] [--obj out.obj]  the Parasolid bodies in a file: node types, failures,
                                             faces and triangles (in the units of the bodies)
+  vwx coverage <file|dir> [--top n] [--list text [--status s]]
+                                            per kind of object on design layers: drawn, or why not
+                                            (--list: the objects of that status whose kind holds text)
 analysis:
   vwx probe <file> [--pretty]               container, compressed streams, strings, entropy (JSON)
   vwx survey <dir>                          one line per file: size, head bytes, streams
@@ -48,7 +53,7 @@ fn positional(args: &[String]) -> Vec<&str> {
             skip = false;
         } else if let Some(name) = a.strip_prefix("--").or_else(|| a.strip_prefix('-').filter(|n| n.len() == 1)) {
             // options with a value
-            skip = matches!(name, "gap" | "stream" | "min" | "out" | "o" | "depth" | "document" | "obj");
+            skip = matches!(name, "gap" | "stream" | "min" | "out" | "o" | "depth" | "document" | "obj" | "top" | "list" | "status");
         } else {
             out.push(a.as_str());
         }
@@ -396,6 +401,7 @@ fn run(args: &[String]) -> Result<Option<Value>, String> {
                 "edges": {"paired": paired, "unpaired": unpaired, "same_way_by_surfaces": same_way},
             })))
         }
+        "coverage" => coverage::run(file()?, |name| opt(args, name).map(str::to_string)).map(|_| None),
         "probe" => to(serde_json::to_value(Probe::of(&read(file()?)?))),
         "survey" => survey(Path::new(file()?)).map(|_| None),
         "hex" => {
