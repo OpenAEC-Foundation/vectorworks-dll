@@ -70,7 +70,13 @@ const DEFAULT_COLOR: [u8; 3] = [200, 200, 204];
 
 /// The meshes of a document.
 pub fn scene(raw: &Raw, info: Info) -> Scene {
-    let mut builder = Builder { raw, batches: BTreeMap::new(), elevation: 0.0, bodies: HashMap::new() };
+    scene_and_drawn(raw, info).0
+}
+
+/// The meshes of a document, and for each record whether drawing it gave triangles or line
+/// segments (what it holds included): the measure of `crate::coverage`.
+pub fn scene_and_drawn(raw: &Raw, info: Info) -> (Scene, Vec<bool>) {
+    let mut builder = Builder { raw, batches: BTreeMap::new(), elevation: 0.0, bodies: HashMap::new(), drawn: vec![false; raw.records.len()], redraw: false };
     for (i, r) in raw.records.iter().enumerate() {
         // a sheet layer is paper, not part of the model
         if r.kind() != kind::LAYER || raw::layer_is_sheet(r.bytes) {
@@ -94,6 +100,9 @@ pub fn scene(raw: &Raw, info: Info) -> Scene {
                 for &part in raw.children[child].iter().filter(|c| !inserts.contains(c)) {
                     builder.walk(part, &Affine::IDENTITY, true, key, 1);
                 }
+                if !builder.drawn.is_empty() && builder.mark(key) != start {
+                    builder.drawn[child] = true;
+                }
             }
             builder.element(child, i, key, start);
             for insert in inserts {
@@ -105,7 +114,7 @@ pub fn scene(raw: &Raw, info: Info) -> Scene {
         }
     }
     // a library file places nothing on its layers: its symbols are what there is to see
-    if builder.batches.values().all(|b| b.mesh.indices.is_empty() && b.mesh.lines.is_empty()) {
+    if builder.batches.values().all(|b| b.mesh.indices.is_empty() && b.mesh.lines.len() == b.markers as usize) {
         builder.library();
     }
     let mut meshes: Vec<Mesh> = builder.batches.into_values().map(|b| b.mesh).filter(|m| !m.indices.is_empty() || !m.lines.is_empty()).collect();
@@ -118,7 +127,7 @@ pub fn scene(raw: &Raw, info: Info) -> Scene {
     if 2 * hidden > all {
         meshes.iter_mut().for_each(|m| m.hidden = false);
     }
-    Scene { info, meshes, views: views(raw), texts: texts(raw), sheets: sheets(raw) }
+    (Scene { info, meshes, views: views(raw), texts: texts(raw), sheets: sheets(raw) }, builder.drawn)
 }
 
 /// The texts on the design layers, on the elevation of their layer.
@@ -182,7 +191,7 @@ fn keeps_drawing(group: &vwx_core::container::Record) -> bool {
 /// True for a group that holds what cuts the hole of its object out of a wall: among its
 /// user data is a record tagged `gchw` or `ggcw` (each window and door of the corpus project
 /// has one of each, with an extrude of 6 m through the wall). It is not a part of the object.
-fn cuts_wall(raw: &Raw, group: usize) -> bool {
+pub(crate) fn cuts_wall(raw: &Raw, group: usize) -> bool {
     raw.children[group].iter().map(|&t| &raw.records[t]).any(|t| t.kind() == kind::USER_DATA && matches!(t.bytes.get(0x50..0x54), Some(b"gchw" | b"ggcw")))
 }
 
@@ -261,7 +270,7 @@ fn sheets(raw: &Raw) -> Vec<vwx_model::Sheet> {
         let mut names = raw::layer_texts(layer.bytes).into_iter();
         let (number, title) = (names.next().unwrap_or_default(), names.next().unwrap_or_default());
         // drawn as a layer is, then only its line work kept, flat
-        let mut builder = Builder { raw, batches: BTreeMap::new(), elevation: 0.0, bodies: HashMap::new() };
+        let mut builder = Builder { raw, batches: BTreeMap::new(), elevation: 0.0, bodies: HashMap::new(), drawn: Vec::new(), redraw: false };
         for &child in &raw.children[i] {
             builder.walk(child, &Affine::IDENTITY, false, (i, 0), 0);
         }
@@ -340,6 +349,8 @@ const LIBRARY: (usize, u32) = (usize::MAX, 0);
 
 struct Batch {
     mesh: Mesh,
+    /// Of `mesh.lines`, the indexes that draw markers (loci): not a form of their object.
+    markers: u32,
 }
 
 struct Builder<'a, 'b> {
@@ -351,6 +362,11 @@ struct Builder<'a, 'b> {
     /// The triangles of the Parasolid bodies read so far, by record: an object inside a symbol
     /// is drawn once for every place the symbol is put.
     bodies: HashMap<usize, Option<Rc<vwx_xt::Mesh>>>,
+    /// Per record: true once drawing it gave triangles or line segments (empty: not kept).
+    drawn: Vec<bool>,
+    /// True while the 2D shapes of an object without a 3D form are drawn: its markers were
+    /// drawn already with its 3D form.
+    redraw: bool,
 }
 
 impl Builder<'_, '_> {
@@ -371,7 +387,7 @@ impl Builder<'_, '_> {
             // and so does what is on an invisible layer
             let hidden = hidden || raw.records.get(key.0).is_some_and(|layer| raw::layer_hidden(layer.bytes));
             let (layer, class) = (if key == LIBRARY { String::new() } else { layer_name.clone() }, raw.names.get(&key.1).cloned().unwrap_or_default());
-            Batch { mesh: Mesh { name, color: DEFAULT_COLOR.map(|c| c as f32 / 255.0), colors: Some(Vec::new()), hidden, layer, class, ..Mesh::default() } }
+            Batch { mesh: Mesh { name, color: DEFAULT_COLOR.map(|c| c as f32 / 255.0), colors: Some(Vec::new()), hidden, layer, class, ..Mesh::default() }, markers: 0 }
         })
     }
 
@@ -479,6 +495,22 @@ impl Builder<'_, '_> {
         (mesh.indices.len() as u32, mesh.lines.len() as u32)
     }
 
+    /// As [`Self::mark`], markers left out: what gives an object a form.
+    fn form(&mut self, key: (usize, u32)) -> (u32, u32) {
+        let batch = self.batch(key);
+        (batch.mesh.indices.len() as u32, batch.mesh.lines.len() as u32 - batch.markers)
+    }
+
+    /// Draws a locus at `at` (placed, millimetres) as a cross: along z too when `up`.
+    fn marker(&mut self, key: (usize, u32), at: P3, color: [u8; 3], up: bool) {
+        let before = self.mark(key).1;
+        for arm in crate::objects::cross(at, up) {
+            self.stroke(key, &arm, color, false);
+        }
+        let added = self.mark(key).1 - before;
+        self.batch(key).markers += added;
+    }
+
     /// Adds the line through `points` (millimetres, placed already), back to its first point
     /// when `closed`.
     fn stroke(&mut self, key: (usize, u32), points: &[P3], color: [u8; 3], closed: bool) {
@@ -555,6 +587,14 @@ impl Builder<'_, '_> {
     /// Draws record `i` and what is inside it. `nested` is true inside a symbol or another
     /// object, where 2D shapes are the plan view.
     fn walk(&mut self, i: usize, place: &Affine, nested: bool, key: (usize, u32), depth: usize) {
+        let before = self.mark(key);
+        self.walk_one(i, place, nested, key, depth);
+        if !self.drawn.is_empty() && self.mark(key) != before {
+            self.drawn[i] = true;
+        }
+    }
+
+    fn walk_one(&mut self, i: usize, place: &Affine, nested: bool, key: (usize, u32), depth: usize) {
         let raw = self.raw;
         let r = &raw.records[i];
         // its class, for what it takes from there
@@ -646,9 +686,35 @@ impl Builder<'_, '_> {
                 }
             }
             kind::POLYGON_3D => {
-                if let Some(points) = shapes::polygon_3d(r).filter(|p| p.len() >= 3) {
-                    let world: Vec<P3> = points.iter().map(|&p| place.apply(p)).collect();
+                // a face when it has a fill and an area, else its outline when it has a pen (a 3D
+                // polygon of two points is a 3D line); with neither it is not seen
+                let Some(points) = shapes::polygon_3d(r).filter(|p| p.len() >= 2) else { return };
+                let world: Vec<P3> = points.iter().map(|&p| place.apply(p)).collect();
+                if world.len() >= 3 && shapes::filled(r, class) && newell(&world).is_some() {
                     self.face(key, &world, color, false);
+                } else if shapes::stroked(r, class) && !self.redraw {
+                    let pen = shapes::pen_index(r, class).and_then(|k| raw.palette.color(k)).unwrap_or(PEN_COLOR);
+                    self.stroke(key, &world, pen, crate::objects::polygon_3d_closed(r));
+                }
+            }
+            // a locus is drawn as a small cross: a 3D locus wherever it is, a 2D locus where
+            // the other 2D shapes are drawn
+            kind::LOCUS_3D => {
+                if self.redraw {
+                    return;
+                }
+                if let Some(at) = crate::objects::locus_3d(r) {
+                    let pen = shapes::pen_index(r, class).and_then(|k| raw.palette.color(k)).unwrap_or(PEN_COLOR);
+                    self.marker(key, place.apply(at), pen, true);
+                }
+            }
+            kind::LOCUS => {
+                if nested {
+                    return;
+                }
+                if let Some(p) = crate::objects::locus(r) {
+                    let pen = shapes::pen_index(r, class).and_then(|k| raw.palette.color(k)).unwrap_or(PEN_COLOR);
+                    self.marker(key, place.apply([p[0], p[1], self.elevation]), pen, false);
                 }
             }
             kind::MESH => {
@@ -715,15 +781,17 @@ impl Builder<'_, '_> {
                     return;
                 }
                 let place = instance.placement.then(place);
-                let before = self.mark(key);
+                let before = self.form(key);
                 for &c in &raw.children[definition] {
                     self.walk(c, &place, true, key, depth + 1);
                 }
                 // a symbol without a 3D form is its 2D shapes
-                if !nested && self.mark(key) == before {
+                if !nested && self.form(key) == before {
+                    let again = std::mem::replace(&mut self.redraw, true);
                     for &c in &raw.children[definition] {
                         self.walk(c, &place, false, key, depth + 1);
                     }
+                    self.redraw = again;
                 }
             }
             // (what cuts the hole of a window or door out of its wall is not drawn)
@@ -740,14 +808,16 @@ impl Builder<'_, '_> {
                 // a plug-in object holds its parts in its own coordinates
                 let placed = (r.kind() == kind::PLUG_IN_OBJECT).then(|| shapes::plug_in_placement(r)).flatten().map(|p| p.then(place));
                 let place = placed.as_ref().unwrap_or(place);
-                let before = self.mark(key);
+                let before = self.form(key);
                 for &c in &raw.children[i] {
                     self.walk(c, place, true, key, depth);
                 }
-                if !nested && self.mark(key) == before {
+                if !nested && self.form(key) == before {
+                    let again = std::mem::replace(&mut self.redraw, true);
                     for &c in &raw.children[i] {
                         self.walk(c, place, false, key, depth);
                     }
+                    self.redraw = again;
                 }
             }
         }
@@ -927,27 +997,27 @@ fn newell(p: &[P3]) -> Option<P3> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::shapes::tests::record;
     use vwx_core::container::{Unpacked, RECORD_HEADER};
     use vwx_core::Header;
 
     /// A drawn object with a solid pen.
-    fn pen(mut r: Vec<u8>) -> Vec<u8> {
+    pub(crate) fn pen(mut r: Vec<u8>) -> Vec<u8> {
         r[0x50] = 2;
         r
     }
 
     /// Sets the parent address (0x26) and the reference and class numbers of a record.
-    fn tagged(mut r: Vec<u8>, parent: u64, reference: u32, class: u32) -> Vec<u8> {
+    pub(crate) fn tagged(mut r: Vec<u8>, parent: u64, reference: u32, class: u32) -> Vec<u8> {
         r[0x26..0x2e].copy_from_slice(&parent.to_le_bytes());
         r[0x1a..0x1e].copy_from_slice(&reference.to_le_bytes());
         r[0x20..0x24].copy_from_slice(&class.to_le_bytes());
         r
     }
 
-    fn layer(name: &str, elevation: f64) -> Vec<u8> {
+    pub(crate) fn layer(name: &str, elevation: f64) -> Vec<u8> {
         let text: Vec<u8> = name.encode_utf16().flat_map(u16::to_le_bytes).collect();
         let mut r = record(kind::LAYER, 0x2a2, &[(0x20e, elevation)]);
         r.extend((text.len() as u32).to_le_bytes());
@@ -958,7 +1028,7 @@ mod tests {
         r
     }
 
-    fn names(list: &[(u32, &str)]) -> Vec<u8> {
+    pub(crate) fn names(list: &[(u32, &str)]) -> Vec<u8> {
         let mut r = record(kind::NAMES, RECORD_HEADER + 12, &[]);
         r[RECORD_HEADER + 8..RECORD_HEADER + 12].copy_from_slice(&(list.len() as u32).to_le_bytes());
         for (id, name) in list {
@@ -972,7 +1042,7 @@ mod tests {
         r
     }
 
-    fn unpacked(records: Vec<Vec<u8>>) -> Unpacked {
+    pub(crate) fn unpacked(records: Vec<Vec<u8>>) -> Unpacked {
         let mut head = vec![0u8; 0x94];
         head[8..12].copy_from_slice(&0x94u32.to_be_bytes());
         head[14..32].copy_from_slice(b"VW32.0.0 VW32.0.0\0");

@@ -48,6 +48,8 @@ pub mod kind {
     pub const VIEWPORT: u8 = 122;
     /// A primitive solid: sphere, hemisphere, cone.
     pub const SOLID: u8 = 95;
+    pub const LOCUS: u8 = 17;
+    pub const LOCUS_3D: u8 = 9;
 }
 
 /// The records of a file with their tree.
