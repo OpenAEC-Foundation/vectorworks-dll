@@ -116,7 +116,7 @@ pub fn scene(raw: &Raw, info: Info) -> Scene {
     if 2 * hidden > all {
         meshes.iter_mut().for_each(|m| m.hidden = false);
     }
-    Scene { info, meshes, views: views(raw), texts: texts(raw), sheets: sheets(raw) }
+    Scene { info, meshes, views: views(raw), texts: texts(raw), sheets: sheets(raw), ..Scene::default() }
 }
 
 /// The texts on the design layers, on the elevation of their layer.
@@ -1179,6 +1179,25 @@ mod tests {
         let u = unpacked(records);
         let scene = scene(&Raw::new(&u).unwrap(), Info::default());
         assert_eq!(&scene.meshes[0].positions[..6], &[2.0, 8.05, 0.0, 3.0, 8.05, 0.0]);
+    }
+
+    #[test]
+    fn the_plan_holds_the_2d_shapes_of_objects_that_are_3d_too() {
+        // a window at (2000, 0) holding a line of 1000 (its plan) and an extrude (its 3D form)
+        let object = record(kind::PLUG_IN_OBJECT, 433, &[(0xf0, 1.0), (0x110, 1.0), (0x130, 1.0), (0x138, 2000.0)]);
+        let records = vec![
+            tagged(layer("L", 0.0), 1, 1, 0),
+            tagged(object, 2, 0, 0),
+            tagged(pen(record(kind::LINE, 140, &[(0x80, 1000.0)])), 3, 0, 0),
+            tagged(record(kind::EXTRUDE, 324, &[]), 3, 0, 0),
+            tagged(record(kind::END, 88, &[]), 3, 0, 0),
+            tagged(record(kind::END, 88, &[]), 2, 0, 0),
+        ];
+        let u = unpacked(records);
+        let plans = crate::plan::plans(&Raw::new(&u).unwrap());
+        assert_eq!(plans.len(), 1);
+        assert_eq!((plans[0].layer.as_str(), plans[0].lines.as_slice()), ("L", &[[[2.0, 0.0], [3.0, 0.0]]][..]));
+        assert_eq!(plans[0].elements, [(1, 0, 1)]);
     }
 
     #[test]

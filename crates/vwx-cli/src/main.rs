@@ -7,6 +7,7 @@ use vwx_core::{diff, hex, scan, Probe};
 const USAGE: &str = "usage:
   vwx info <file.vwx>                       document facts
   vwx read <file.vwx> [--elements]          read the file; meshes and triangles per mesh
+                                            (--plan <layer>, --sheet <n>: that one in full)
                                             (--elements: bounds and properties per object)
   vwx document <file.vwx>                   the neutral model as JSON
   vwx mesh <file.vwx> [--obj out.obj]       bounds and triangles of the meshes; writes an OBJ
@@ -155,6 +156,13 @@ fn run(args: &[String]) -> Result<Option<Value>, String> {
         "read" => {
             let path = file()?;
             let scene = vwx_read::read(&read(path)?).map_err(|e| format!("{path}: {e}"))?;
+            // --plan <layer>: the plan of that design layer in full
+            if let Some(layer) = opt(args, "--plan") {
+                return match scene.plans.iter().find(|p| p.layer == layer) {
+                    Some(plan) => to(serde_json::to_value(plan)),
+                    None => Err(format!("{path}: no plan of layer {layer}")),
+                };
+            }
             // --sheet <number>: that sheet in full
             if let Some(number) = opt(args, "--sheet") {
                 return match scene.sheets.iter().find(|s| s.number == number) {
@@ -193,6 +201,7 @@ fn run(args: &[String]) -> Result<Option<Value>, String> {
                     "name": m.name, "triangles": m.indices.len() / 3, "lines": m.lines.len() / 2, "objects": m.props.len(), "hidden": m.hidden,
                 })).collect::<Vec<_>>(),
                 "views": scene.views,
+                "plans": scene.plans.iter().map(|p| json!({"layer": p.layer, "lines": p.lines.len(), "objects": p.elements.len()})).collect::<Vec<_>>(),
                 "texts": scene.texts,
                 "sheets": scene.sheets.iter().map(|s| json!({
                     "number": s.number, "title": s.title, "lines": s.lines.len(), "viewports": s.viewports,

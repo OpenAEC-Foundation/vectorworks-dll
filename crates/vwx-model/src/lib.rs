@@ -124,6 +124,21 @@ pub struct Scene {
     pub texts: Vec<Text>,
     /// The sheet layers: the drawing sheets of the document.
     pub sheets: Vec<Sheet>,
+    /// The plan of each design layer with 2D line work: what the top/plan view shows.
+    #[serde(default)]
+    pub plans: Vec<Plan>,
+}
+
+/// The plan of a design layer: its 2D line work as seen from above, the plan views of its
+/// objects included (walls, doors, windows, symbols), in metres, x right and y up.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Plan {
+    /// The name of the layer.
+    pub layer: String,
+    /// Line segments, each from one point to another.
+    pub lines: Vec<[[f32; 2]; 2]>,
+    /// The objects among the segments: (object id, first segment, count).
+    pub elements: Vec<(u64, u32, u32)>,
 }
 
 /// A sheet layer: what is drawn on the paper itself (its title block, notes), in metres on
