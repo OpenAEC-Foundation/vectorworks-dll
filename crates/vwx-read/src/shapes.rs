@@ -163,6 +163,20 @@ pub fn polygon_3d(r: &Record) -> Option<Vec<P3>> {
     (0..count).map(|k| xyz(r, 0xd2 + 24 * k)).collect()
 }
 
+/// The points of a mesh (type 40): `u32` count at 0xd0, then 28 bytes each from 0xd4 (x, y, z
+/// and a `u32`).
+pub fn mesh_points(r: &Record) -> Option<Vec<P3>> {
+    let count = le::u32(r.bytes, 0xd0)? as usize;
+    (0..count).map(|k| xyz(r, 0xd4 + 28 * k)).collect()
+}
+
+/// A face of a mesh (type 41, a child of the mesh): `u16` count at 0xcc, then the numbers of
+/// its points from 0xce as `u32`, counted from 1. Returned counted from 0.
+pub fn mesh_face(r: &Record) -> Option<Vec<usize>> {
+    let count = le::u16(r.bytes, 0xcc)? as usize;
+    (0..count).map(|k| (le::u32(r.bytes, 0xce + 4 * k)? as usize).checked_sub(1)).collect()
+}
+
 /// The palette index of the fill colour of a drawn object (`u16` at 0x58).
 pub fn fill_index(r: &Record) -> Option<u16> {
     le::u16(r.bytes, 0x58)
@@ -217,6 +231,22 @@ pub(crate) mod tests {
         let p = e.placement.apply([1000.0, 0.0, 0.0]);
         assert!((p[0] - 866.0254037844386).abs() < 1e-9 && (p[1] - 500.0).abs() < 1e-9);
         assert!(!e.placement.mirrors());
+    }
+
+    #[test]
+    fn mesh_as_sample_120() {
+        let mut m = record(kind::MESH, 0xd4 + 2 * 28, &[(0xd4 + 16, 3000.0), (0xd4 + 28, 1000.0), (0xd4 + 28 + 16, 3000.0)]);
+        m[0xd0] = 2;
+        assert_eq!(mesh_points(&rec(&m)).unwrap(), [[0.0, 0.0, 3000.0], [1000.0, 0.0, 3000.0]]);
+        let mut f = record(kind::MESH_FACE, 218, &[]);
+        f[0xcc] = 3;
+        for (k, n) in [2u32, 4, 3].iter().enumerate() {
+            f[0xce + 4 * k..0xd2 + 4 * k].copy_from_slice(&n.to_le_bytes());
+        }
+        assert_eq!(mesh_face(&rec(&f)).unwrap(), [1, 3, 2]);
+        // a point number of 0 is not a point
+        f[0xce] = 0;
+        assert!(mesh_face(&rec(&f)).is_none());
     }
 
     #[test]

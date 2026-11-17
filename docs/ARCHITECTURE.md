@@ -36,7 +36,7 @@ Black-box only (see the clean-room rules in the README):
 | Container: Snappy blocks, records, object types, object tree | **done** (`vwx_core::container`) | 787 of 787 corpus files open, 2.2 M objects, 26 s |
 | Document tables: reference table, name list, classes, layers (name, elevation), colour palette | **done**; units and origin, class attributes and visibility open | ladder samples; palette against the scripting API |
 | 2D primitives: line, rectangle, oval, polygon, arc, circle, locus | **done**; polyline, rounded rectangle, text open | ladder samples 02 to 18 |
-| 3D primitives: extrude, 3D polygon | **done**; multiple extrude, sweep, mesh, NURBS open | meshes equal to Vectorworks' STL export for samples 20 to 27, 30 |
+| 3D primitives: extrude, 3D polygon, mesh | **done**; multiple extrude, sweep, NURBS open | meshes equal to Vectorworks' STL export for samples 20 to 27, 30 |
 | Symbols: definitions, instances (placement, scale) | **done** | STL export of samples 50, 51 |
 | Groups and nesting | **done** | sample 43 |
 | Solids as Parasolid bodies (walls, CSG solids, slabs, primitives): type 114 section 19, type 85 | found, not read; the wire frame (sections 0 and 13) is understood | — |

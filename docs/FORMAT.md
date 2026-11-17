@@ -180,6 +180,7 @@ Every drawn object starts alike:
 | 6 arc | 210 | start point at 0x90, end point at 0xa0, centre at 0xb0 (each y, x); at 0xc0 an angle a and at 0xc8 the sweep, in degrees: the arc runs from 90 - (a + sweep) to 90 - a, counter-clockwise from the x axis (samples 15, 16) |
 | 25 3D polygon | 0xd2 + 24n | six `f64` at 0x9c (largest then smallest x, y, z); `u16` count at 0xd0; points from 0xd2 (sample 30) |
 | 24 extrude | 324 | addresses of its first and last child at 0x8c, 0x94; local box at 0x9c (largest then smallest x, y, z); placement at 0xcc; bottom and top along local z at 0x130, 0x138. The children are the profile, 2D objects in the local xy plane (samples 20 to 27) |
+| 40 mesh | 0xd4 + 28n | `u32` point count at 0xd0; from 0xd4 per point x, y, z and a `u32` (`0x100`). Its children of type 41 are the faces: `u16` count at 0xcc, then the numbers of its points as `u32` from 0xce, counted from 1 (sample 120) |
 | 15 symbol | 280 | `u32` reference number of the definition at 0x8e; placement at 0x96; scale factors along the local axes at 0x100 (samples 50, 51) |
 | 16 symbol definition | 372 | its children are the content; found by its reference number |
 | 11 group | 204 | its children |
@@ -204,7 +205,6 @@ Solids made as primitives (type 95: sphere, cone, hemisphere) have a type 85 chi
 
 ### Not decoded yet
 
-Polyline (21), text (10), rounded rectangle (13), sweep (34), multiple extrude (38), mesh (40,
-41), NURBS (111, 113), type 42 under profile shapes, slab (71), plug-in object (86), viewport
+Polyline (21), text (10), rounded rectangle (13), sweep (34), multiple extrude (38), NURBS (111, 113), type 42 under profile shapes, slab (71), plug-in object (86), viewport
 (122), records and formats (47, 48), styles (102, 107, 127), saved views, sheet layers, class
 attributes and visibility.

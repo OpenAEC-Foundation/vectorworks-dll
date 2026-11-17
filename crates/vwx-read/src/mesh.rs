@@ -3,7 +3,7 @@
 //! What is drawn so far (`docs/ARCHITECTURE.md` has the list of what is not):
 //!
 //! - extrudes of rectangles, ovals, circles and polygons;
-//! - 3D polygons;
+//! - 3D polygons and meshes;
 //! - rectangles, ovals, circles and polygons drawn on a layer itself, as flat faces at the
 //!   layer's elevation;
 //! - placed symbols (the content of their definition), groups, and whatever of the above sits
@@ -124,6 +124,19 @@ impl Builder<'_, '_> {
                 if let Some(points) = shapes::polygon_3d(r).filter(|p| p.len() >= 3) {
                     let world: Vec<P3> = points.iter().map(|&p| place.apply(p)).collect();
                     self.face(key, &world, color, false);
+                }
+            }
+            kind::MESH => {
+                let Some(points) = shapes::mesh_points(r) else { return };
+                for &c in &raw.children[i] {
+                    let face = &raw.records[c];
+                    if face.kind() != kind::MESH_FACE {
+                        continue;
+                    }
+                    let corners: Option<Vec<P3>> = shapes::mesh_face(face).and_then(|f| f.iter().map(|&k| points.get(k).map(|&p| place.apply(p))).collect());
+                    if let Some(corners) = corners.filter(|c| c.len() >= 3) {
+                        self.face(key, &corners, color, place.mirrors());
+                    }
                 }
             }
             kind::RECTANGLE | kind::OVAL | kind::POLYGON | kind::ARC => {

@@ -19,6 +19,8 @@ pub mod kind {
     pub const EXTRUDE: u8 = 24;
     pub const POLYGON_3D: u8 = 25;
     pub const LAYER: u8 = 31;
+    pub const MESH: u8 = 40;
+    pub const MESH_FACE: u8 = 41;
     pub const NAMES: u8 = 55;
     pub const USER_DATA: u8 = 76;
     pub const CSG_SOLID: u8 = 84;
