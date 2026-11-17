@@ -115,6 +115,28 @@ pub struct Document {
     /// The image fills of the document.
     #[serde(default)]
     pub image_fills: Vec<ImageFill>,
+    /// The named resources of the document, as its resource browser lists them.
+    #[serde(default)]
+    pub resources: Vec<Resource>,
+}
+
+/// A named resource: a symbol definition, a style, a text style, a script, a record format, a
+/// folder that holds others, a font; also the description of a class or layer.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Resource {
+    /// The object it is, as in [`Object::id`] (0 for what has no object of its own).
+    pub id: u64,
+    /// Its kind, as [`Object::kind`] names it (`symbol definition`, `text style`, `document
+    /// script`, `symbol folder`, `font`, `class`, `layer`, ..).
+    pub kind: String,
+    pub name: String,
+    /// The folders it is in, the outermost first; for a script or a saved view the palette.
+    #[serde(default)]
+    pub folder: Vec<String>,
+    /// What else is known of it: the `text` of a script, the `size` of a text style in points,
+    /// the `description` of a class or layer, the `font` number.
+    #[serde(default)]
+    pub fields: Vec<(String, Value)>,
 }
 
 /// A triangle mesh for a viewer: one per layer/class/material batch.

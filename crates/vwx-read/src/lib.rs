@@ -27,6 +27,7 @@ pub mod palette;
 pub mod plan;
 pub mod raw;
 pub mod records;
+pub mod resources;
 pub mod shapes;
 pub mod styles;
 pub mod tri;
@@ -99,6 +100,7 @@ fn document(raw: &Raw, info: Info) -> Document {
     }
     doc.info.objects = doc.objects.len();
     styles::add_to(raw, &mut doc);
+    doc.resources = resources::read(raw);
     doc
 }
 
