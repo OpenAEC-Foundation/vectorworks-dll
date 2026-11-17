@@ -247,8 +247,14 @@ of the model lies, in the millimetres of the model (divided by the scale: on the
 the eye: the other way round from the type 43 record of a saved view); the scale as an `f64`
 at 0x2e4 (pair 200/201: 50 and 100; samples 203, 204 for the view; the eight viewports of
 `Residential New Construction.sta`: two plans, two sections, four elevations, all 1 : 50). A
-viewport made by a script and never drawn has a box without a size. Which layers and classes
-it shows, its crop, and the cut of a section viewport are not decoded (user data `vpdn`).
+viewport made by a script and never drawn has a box without a size.
+
+The record ends with what the viewport shows: `u16` counts of layers and of classes at 0x356 and
+0x358, then 8 bytes for each, the layers first: `u32` reference number, `i16` visibility (0
+visible, -1 invisible, 2 greyed), a `u16` (pairs 240 to 245; `Section-1` of the corpus project
+names its 9 design layers and 25 classes, the classes of spaces and fittings invisible). A new
+viewport names none and shows nothing. Its crop and the cut of a section viewport are not
+decoded.
 
 ### Dimensions: type 63
 

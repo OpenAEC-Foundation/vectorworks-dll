@@ -101,6 +101,9 @@ pub struct Mesh {
     pub elements: Vec<(u64, u32, u32)>,
     /// Object properties as flat JSON objects, by object id.
     pub props: Vec<(u64, String)>,
+    /// The layer and the class what it holds is in, by name (empty: none).
+    pub layer: String,
+    pub class: String,
     /// Hidden in the file (an invisible layer or class): starts switched off.
     pub hidden: bool,
     /// Line segments (lines, arcs, the outlines of shapes without a fill): pairs of vertex
@@ -153,6 +156,9 @@ pub struct Viewport {
     /// From the eye into the model, and up on the sheet.
     pub forward: [f32; 3],
     pub up: [f32; 3],
+    /// The design layers it does not show, and the classes it does not show, by name.
+    pub hidden_layers: Vec<String>,
+    pub hidden_classes: Vec<String>,
 }
 
 /// A text of the document (metres, Z up).

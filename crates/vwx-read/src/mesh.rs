@@ -168,6 +168,9 @@ fn texts_in(raw: &Raw, i: usize, place: &Affine, layer: &str, depth: usize, out:
 /// The sheet layers of a document: what is drawn on each (lines, arcs, outlines; texts).
 fn sheets(raw: &Raw) -> Vec<vwx_model::Sheet> {
     let mut out = Vec::new();
+    // the design layers: reference number and name
+    let design_layers: Vec<(u32, String)> =
+        raw.records.iter().filter(|r| r.kind() == kind::LAYER && !raw::layer_is_sheet(r.bytes)).map(|r| (r.ref_id(), raw::layer_name(r.bytes).unwrap_or_default())).collect();
     for (i, layer) in raw.records.iter().enumerate() {
         if layer.kind() != kind::LAYER || !raw::layer_is_sheet(layer.bytes) {
             continue;
@@ -198,6 +201,9 @@ fn sheets(raw: &Raw) -> Vec<vwx_model::Sheet> {
                 origin: v.origin.map(|x| (x * SCALE) as f32),
                 forward: v.axes[2].map(|x| -x as f32),
                 up: v.axes[1].map(|x| x as f32),
+                // it shows the design layers it names as visible or greyed, and no others
+                hidden_layers: design_layers.iter().filter(|(number, _)| !v.layers.iter().any(|(n, visibility)| n == number && *visibility != -1)).map(|(_, name)| name.clone()).collect(),
+                hidden_classes: v.classes.iter().filter(|(_, visibility)| *visibility == -1).filter_map(|(n, _)| raw.names.get(n).cloned()).collect(),
             });
         }
         out.push(vwx_model::Sheet { id: i as u64, number, title, lines, texts, viewports });
@@ -252,6 +258,7 @@ impl Builder<'_, '_> {
                 LIBRARY => "Symbols".into(),
                 _ => raw::layer_name(raw.records[key.0].bytes).unwrap_or_else(|| "Layer".into()),
             };
+            let layer_name = layer.clone();
             let name = match raw.names.get(&key.1) {
                 Some(class) => format!("{layer} / {class}"),
                 None => layer,
@@ -260,7 +267,8 @@ impl Builder<'_, '_> {
             let hidden = raw.by_ref.get(&key.1).is_some_and(|&class| raw::class_hidden(raw.records[class].bytes));
             // and so does what is on an invisible layer
             let hidden = hidden || raw.records.get(key.0).is_some_and(|layer| raw::layer_hidden(layer.bytes));
-            Batch { mesh: Mesh { name, color: DEFAULT_COLOR.map(|c| c as f32 / 255.0), colors: Some(Vec::new()), hidden, ..Mesh::default() } }
+            let (layer, class) = (if key == LIBRARY { String::new() } else { layer_name.clone() }, raw.names.get(&key.1).cloned().unwrap_or_default());
+            Batch { mesh: Mesh { name, color: DEFAULT_COLOR.map(|c| c as f32 / 255.0), colors: Some(Vec::new()), hidden, layer, class, ..Mesh::default() } }
         })
     }
 
@@ -1097,6 +1105,8 @@ mod tests {
         assert_eq!((sheet.number.as_str(), sheet.title.as_str()), ("001", "Plans"));
         let v = &sheet.viewports[0];
         assert_eq!((v.name.as_str(), v.min, v.max, v.scale, v.forward), ("GF Plan", [-0.369, 0.027], [0.172, 0.275], 50.0, [0.0, 0.0, -1.0]));
+        // it names no layers: it shows none of the design layers (here there are none)
+        assert!(v.hidden_layers.is_empty() && v.hidden_classes.is_empty());
         assert_eq!(sheet.lines, [[[0.0, 0.0], [0.42, 0.0]]]);
         // the text of the title block, where the block is
         assert_eq!((sheet.texts[0].text.as_str(), sheet.texts[0].at), ("Plans", [0.105, 0.06, 0.0]));

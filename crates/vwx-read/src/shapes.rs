@@ -95,6 +95,10 @@ pub struct Viewport {
     pub origin: P2,
     /// Right on the sheet, up on the sheet and towards the eye, as directions in the model.
     pub axes: [P3; 3],
+    /// What it says of layers and of classes: the reference number of each it names with its
+    /// visibility there (0 visible, -1 invisible, 2 greyed).
+    pub layers: Vec<(u32, i16)>,
+    pub classes: Vec<(u32, i16)>,
 }
 
 /// A viewport (type 122): the box it takes on its sheet at 0x68 (top, left, bottom, right); a
@@ -103,6 +107,11 @@ pub struct Viewport {
 /// the view (x right, y up, z towards the eye); the scale as an `f64` at 0x2e4 (pair 200/201:
 /// 50 and 100; views 203, 204; the eight viewports of `Residential New Construction.sta`, all
 /// 1 : 50, whose two plans have the origin of the model at the same x on their sheet).
+///
+/// The record ends with what the viewport shows: `u16` counts of layers and of classes at 0x356
+/// and 0x358, then 8 bytes for each, the layers first: `u32` reference number, `i16`
+/// visibility (0 visible, -1 invisible, 2 greyed), a `u16` (pairs 240 to 245). A viewport shows
+/// the layers it names as visible only: a new one names none.
 pub fn viewport(r: &Record) -> Option<Viewport> {
     let (top, left, bottom, right) = (real(r, 0x68)?, real(r, 0x70)?, real(r, 0x78)?, real(r, 0x80)?);
     // a viewport that was never drawn has a box without a size
@@ -116,7 +125,11 @@ pub fn viewport(r: &Record) -> Option<Viewport> {
     let axes = [0, 1, 2].map(|k| [m[0][k], m[1][k], m[2][k]]);
     let dot = |a: P3, b: P3| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
     let square = (0..3).all(|i| (dot(axes[i], axes[i]) - 1.0).abs() < 1e-6 && dot(axes[i], axes[(i + 1) % 3]).abs() < 1e-6);
-    square.then_some(Viewport { min: [left, bottom], max: [right, top], scale, origin: [at[0] / scale, at[1] / scale], axes })
+    let (layer_count, class_count) = (le::u16(r.bytes, 0x356).unwrap_or(0) as usize, le::u16(r.bytes, 0x358).unwrap_or(0) as usize);
+    let entry = |k: usize| Some((le::u32(r.bytes, 0x35a + 8 * k)?, le::u16(r.bytes, 0x35e + 8 * k)? as i16));
+    let layers: Vec<(u32, i16)> = (0..layer_count).map_while(entry).collect();
+    let classes: Vec<(u32, i16)> = (layer_count..layer_count + class_count).map_while(entry).collect();
+    square.then_some(Viewport { min: [left, bottom], max: [right, top], scale, origin: [at[0] / scale, at[1] / scale], axes, layers, classes })
 }
 
 /// The way a view looks at the model (type 43, a child of a saved view or of a layer): at 0x9c
@@ -704,7 +717,15 @@ pub(crate) mod tests {
         // on its sheet from (-477, -125) to (48, 106), 1 : 50, the model seen from the front:
         // its x to the right, its z up, its y away from the eye
         let reals = [(0x68, 106.0), (0x70, -477.0), (0x78, -125.0), (0x80, 48.0), (0xd4, -15846.1), (0xdc, -4853.2), (0x23e, 1.0), (0x266, -1.0), (0x276, 1.0), (0x2e4, 50.0)];
-        let v = viewport(&rec(&record(kind::VIEWPORT, 1130, &reals))).unwrap();
+        let mut bytes = record(kind::VIEWPORT, 0x35a + 16, &reals);
+        // one layer (number 47) shown, one class (number 130) not
+        bytes[0x356] = 1;
+        bytes[0x358] = 1;
+        bytes[0x35a] = 47;
+        bytes[0x362] = 130;
+        bytes[0x366..0x368].copy_from_slice(&[0xff, 0xff]);
+        let v = viewport(&rec(&bytes)).unwrap();
+        assert_eq!((v.layers.as_slice(), v.classes.as_slice()), (&[(47, 0)][..], &[(130, -1)][..]));
         assert_eq!((v.min, v.max, v.scale), ([-477.0, -125.0], [48.0, 106.0], 50.0));
         assert!((v.origin[0] + 316.922).abs() < 1e-9 && (v.origin[1] + 97.064).abs() < 1e-9);
         assert_eq!(v.axes, [[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]]);
