@@ -136,9 +136,20 @@ pub struct Sheet {
     pub title: String,
     /// Line segments, each from one point to another.
     pub lines: Vec<[[f32; 2]; 2]>,
+    /// Regions filled in one colour, under the lines: what a section viewport cuts.
+    pub fills: Vec<Fill>,
     pub texts: Vec<Text>,
     /// The views of the model placed on it.
     pub viewports: Vec<Viewport>,
+}
+
+/// A region of a sheet filled in one colour (red, green, blue): its outline, and the object
+/// it belongs to.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Fill {
+    pub id: u64,
+    pub outline: Vec<[f32; 2]>,
+    pub color: [u8; 3],
 }
 
 /// A viewport: a view of the model on a sheet (metres on paper; directions in the model, Z up).

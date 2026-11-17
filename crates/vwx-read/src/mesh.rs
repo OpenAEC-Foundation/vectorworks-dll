@@ -188,38 +188,53 @@ fn is_crop(raw: &Raw, group: usize) -> bool {
 /// elevation the outline of what it shows. A point of the view lies on the sheet at the
 /// viewport's origin plus the point divided by the scale (`Section-1` of the corpus project:
 /// its kept drawing, 8.6 m by 7.9 m at 1 : 50, fills the box of the viewport so placed).
-fn kept_drawing(raw: &Raw, viewport: usize, v: &shapes::Viewport) -> Vec<[[f32; 2]; 2]> {
+fn kept_drawing(raw: &Raw, viewport: usize, v: &shapes::Viewport) -> (Vec<[[f32; 2]; 2]>, Vec<vwx_model::Fill>) {
     let on_sheet = |p: P2| [((v.origin[0] + p[0] / v.scale) * SCALE) as f32, ((v.origin[1] + p[1] / v.scale) * SCALE) as f32];
-    let mut out = Vec::new();
+    let (mut lines, mut fills) = (Vec::new(), Vec::new());
     for &group in raw.children[viewport].iter().filter(|&&g| raw.records[g].kind() == kind::GROUP) {
         // (its other groups are its annotations and its crop)
         if !keeps_drawing(&raw.records[group]) {
             continue;
         }
-        let shapes_of: Vec<usize> =
-            raw.children[group].iter().copied().filter(|&c| matches!(raw.records[c].kind(), kind::LINE | kind::POLYGON | kind::POLYLINE | kind::RECTANGLE | kind::ARC | kind::OVAL)).collect();
-        for c in shapes_of {
+        // its shapes, and the shapes those hold (the parts of what is cut)
+        let mut todo: Vec<(usize, usize)> = raw.children[group].iter().rev().map(|&c| (c, 0)).collect();
+        while let Some((c, depth)) = todo.pop() {
             let r = &raw.records[c];
+            if depth < MAX_DEPTH && r.kind() != kind::USER_DATA {
+                todo.extend(raw.children[c].iter().rev().map(|&k| (k, depth + 1)));
+            }
+            if !matches!(r.kind(), kind::LINE | kind::POLYGON | kind::POLYLINE | kind::RECTANGLE | kind::ARC | kind::OVAL) {
+                continue;
+            }
+            let class = raw.by_ref.get(&r.class_id()).map(|&k| &raw.records[k]).filter(|k| k.kind() == kind::CLASS);
+            let outline = shapes::outline(r).filter(|o| o.iter().flatten().all(|x| x.is_finite()));
+            // what is cut is filled in the colour of its fill
+            if let Some(outline) = outline.as_ref().filter(|_| r.kind() != kind::LINE && shapes::closed(r) && shapes::filled(r, class)) {
+                let color = shapes::fill_index(r, class).and_then(|k| raw.palette.color(k)).unwrap_or(DEFAULT_COLOR);
+                fills.push(vwx_model::Fill { id: c as u64, outline: outline.iter().map(|p| on_sheet(*p)).collect(), color });
+            }
+            if !shapes::stroked(r, class) {
+                continue;
+            }
             if let Some(vertices) = (r.kind() == kind::POLYLINE).then(|| shapes::polyline(r)).flatten() {
                 // a polyline: its sides that are drawn (those to its holes are not)
-                out.extend(shapes::polyline_segments(&vertices, shapes::closed(r)).into_iter().filter(|s| s.iter().flatten().all(|c| c.is_finite())).map(|[a, b]| [on_sheet(a), on_sheet(b)]));
+                lines.extend(shapes::polyline_segments(&vertices, shapes::closed(r)).into_iter().filter(|s| s.iter().flatten().all(|c| c.is_finite())).map(|[a, b]| [on_sheet(a), on_sheet(b)]));
                 continue;
             }
             let points: Vec<P2> = match r.kind() {
                 kind::LINE => shapes::line(r).map(|l| l.to_vec()).unwrap_or_default(),
-                _ => shapes::outline(r).or_else(|| shapes::arc(r)).unwrap_or_default(),
+                _ => outline.clone().or_else(|| shapes::arc(r)).unwrap_or_default(),
             };
-            let closed = r.kind() != kind::LINE && shapes::closed(r) && shapes::outline(r).is_some();
             if points.len() < 2 || points.iter().flatten().any(|c| !c.is_finite()) {
                 continue;
             }
-            out.extend(points.windows(2).map(|w| [on_sheet(w[0]), on_sheet(w[1])]));
-            if closed && points.len() > 2 {
-                out.push([on_sheet(points[points.len() - 1]), on_sheet(points[0])]);
+            lines.extend(points.windows(2).map(|w| [on_sheet(w[0]), on_sheet(w[1])]));
+            if r.kind() != kind::LINE && shapes::closed(r) && outline.is_some() && points.len() > 2 {
+                lines.push([on_sheet(points[points.len() - 1]), on_sheet(points[0])]);
             }
         }
     }
-    out
+    (lines, fills)
 }
 
 /// The sheet layers of a document: what is drawn on each (lines, arcs, outlines; texts).
@@ -258,9 +273,12 @@ fn sheets(raw: &Raw) -> Vec<vwx_model::Sheet> {
             lines.extend(batch.mesh.lines.as_chunks::<2>().0.iter().map(|pair| [point(pair[0]), point(pair[1])]));
         }
         let mut viewports = Vec::new();
+        let mut fills = Vec::new();
         for &c in raw.children[i].iter().filter(|&&c| raw.records[c].kind() == kind::VIEWPORT) {
             let Some(v) = shapes::viewport(&raw.records[c]) else { continue };
-            lines.extend(kept_drawing(raw, c, &v));
+            let (kept, filled) = kept_drawing(raw, c, &v);
+            lines.extend(kept);
+            fills.extend(filled);
             viewports.push(vwx_model::Viewport {
                 id: c as u64,
                 name: raw.name(c).unwrap_or_default().to_string(),
@@ -280,7 +298,7 @@ fn sheets(raw: &Raw) -> Vec<vwx_model::Sheet> {
                 hidden_classes: v.classes.iter().filter(|(_, visibility)| *visibility == -1).filter_map(|(n, _)| raw.names.get(n).cloned()).collect(),
             });
         }
-        out.push(vwx_model::Sheet { id: i as u64, number, title, lines, texts, viewports });
+        out.push(vwx_model::Sheet { id: i as u64, number, title, lines, fills, texts, viewports });
     }
     out
 }
@@ -1170,6 +1188,8 @@ mod tests {
         let line = pen(record(kind::LINE, 140, &[(0x80, 420.0)]));
         let mut kept = record(kind::GROUP, 204, &[]);
         kept[0x55] = 1;
+        let mut cut = record(kind::RECTANGLE, 188, &[(0xa4, 1.0), (0xac, 1000.0), (0xb4, 500.0)]);
+        cut[0x64] = 1;
         let block = record(kind::PLUG_IN_OBJECT, 433, &[(0xf0, 1.0), (0x110, 1.0), (0x130, 1.0), (0x138, 100.0), (0x140, 50.0)]);
         let mut text = record(kind::TEXT, 0x19c, &[(0x68, 10.0), (0x70, 5.0), (0x78, 6.0), (0x80, 45.0), (0x108, 12.0)]);
         text[0xa6] = 5;
@@ -1194,6 +1214,8 @@ mod tests {
             // with a group that keeps a line of its drawing: 5 m long, in the millimetres of the view
             tagged(kept, 4, 0, 0),
             tagged(pen(record(kind::LINE, 140, &[(0x80, 5000.0)])), 5, 0, 0),
+            // and what it cuts: a rectangle of 1000 x 500 with a fill and no pen
+            tagged(cut, 5, 0, 0),
             tagged(record(kind::END, 88, &[]), 5, 0, 0),
             // and a group of annotations: a line of 2.5 m in the millimetres of the sheet times 50
             tagged(record(kind::GROUP, 204, &[]), 4, 0, 0),
@@ -1216,6 +1238,9 @@ mod tests {
         // then the annotation of the viewport (50 mm on the sheet), then the line the viewport keeps
         // (100 mm, from the origin of the view)
         assert_eq!(sheet.lines, [[[0.0, 0.0], [0.42, 0.0]], [[0.0, 0.0], [0.05, 0.0]], [[-0.2, 0.1], [-0.1, 0.1]]]);
+        // what the viewport cuts, filled: 20 mm by 10 mm on the sheet, from the origin of the view
+        assert_eq!(sheet.fills.len(), 1);
+        assert_eq!(sheet.fills[0].outline, [[-0.2, 0.1], [-0.18, 0.1], [-0.18, 0.11], [-0.2, 0.11]]);
         // the text of the title block, where the block is
         assert_eq!((sheet.texts[0].text.as_str(), sheet.texts[0].at), ("Plans", [0.105, 0.06, 0.0]));
     }

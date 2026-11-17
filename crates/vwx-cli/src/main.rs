@@ -228,11 +228,26 @@ fn run(args: &[String]) -> Result<Option<Value>, String> {
             // the Parasolid bodies of a file (or of raw XT data): node counts, and what fails
             let path = file()?;
             let data = read(path)?;
-            let body = match vwx_core::container::unpack(&data) {
-                Ok(u) => u.body,
-                Err(_) => data,
+            let (body, document) = match vwx_core::container::unpack(&data) {
+                Ok(u) => (u.body, true),
+                Err(_) => (data, false),
             };
-            let starts = vwx_xt::find(&body);
+            // in a document: the bodies in the records that hold solids (type 114). Elsewhere
+            // bytes may look like the start of one: a record format keeps what was in memory
+            // after its field names
+            let mut spans: Vec<(usize, usize)> = Vec::new();
+            match vwx_core::container::records(&body).ok().filter(|_| document) {
+                Some(records) => {
+                    for r in records.iter().filter(|r| r.kind() == 114) {
+                        let starts = vwx_xt::find(r.bytes);
+                        spans.extend(starts.iter().enumerate().map(|(k, &at)| (r.offset + at, r.offset + starts.get(k + 1).copied().unwrap_or(r.bytes.len()))));
+                    }
+                }
+                None => {
+                    let starts = vwx_xt::find(&body);
+                    spans.extend(starts.iter().enumerate().map(|(k, &at)| (at, starts.get(k + 1).copied().unwrap_or(body.len()))));
+                }
+            }
             let mut kinds = std::collections::BTreeMap::<String, usize>::new();
             let mut errors = std::collections::BTreeMap::<String, usize>::new();
             let mut schemas = std::collections::BTreeMap::<String, usize>::new();
@@ -248,8 +263,7 @@ fn run(args: &[String]) -> Result<Option<Value>, String> {
             let (mut lo, mut hi) = ([f64::MAX; 3], [f64::MIN; 3]);
             let mut obj = String::new();
             let mut obj_base = 1u32;
-            for (k, &at) in starts.iter().enumerate() {
-                let end = starts.get(k + 1).copied().unwrap_or(body.len());
+            for (k, &(at, end)) in spans.iter().enumerate() {
                 match vwx_xt::parse(&body[at..end]) {
                     Ok(f) => {
                         ok += 1;
@@ -349,7 +363,7 @@ fn run(args: &[String]) -> Result<Option<Value>, String> {
             }
             let bounds = if triangles > 0 { json!([lo, hi]) } else { Value::Null };
             Ok(Some(json!({
-                "bodies": starts.len(), "parsed": ok, "nodes": nodes, "schemas": schemas, "types": kinds, "errors": errors,
+                "bodies": spans.len(), "parsed": ok, "nodes": nodes, "schemas": schemas, "types": kinds, "errors": errors,
                 "faces": faces, "approximate_faces": approximate, "skipped_faces": skipped, "triangles": triangles, "bounds": bounds, "straight_edges_by_curve": straight, "approximate_by_surface": approximate_by, "triangles_by_surface": triangles_by,
                 "edges": {"paired": paired, "unpaired": unpaired, "same_way_by_surfaces": same_way},
             })))

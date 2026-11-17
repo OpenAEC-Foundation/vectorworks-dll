@@ -262,7 +262,8 @@ the view: a section viewport the outlines of what it cuts (`hcsc`, polygons and 
 the records of the objects cut), the lines beyond the cut (`ncsp`) and the outline of the
 whole (`hcac`); an elevation the outline of what it shows. A point of the view lies on the
 sheet at the origin of the viewport plus the point divided by the scale. The groups that keep
-the drawing have 1 in the byte at 0x55. The annotations (labels, dimensions, notes) are in the
+the drawing have 1 in the byte at 0x55; what is cut is filled (in the corpus project in grey, a
+fill taken from the class), and its parts are shapes held by its shape. The annotations (labels, dimensions, notes) are in the
 millimetres of the sheet times the scale: a label of `GF Plan` at (-18433, 12051) is at
 (-369, 241) on the sheet. Where the cut of a section viewport lies in the model is not decoded.
 
@@ -312,8 +313,10 @@ topology (body, shell, face, loop, fin, edge, vertex) or geometry (plane, cylind
 line, circle, B-curve, ...). The field layout of each node type is the base schema 13006 with an
 edit sequence the file gives at the first node of the type; the reference prints later structs
 for `LIST` and `POINTER_LIS_BLOCK`, whose 13006 layouts were found from those edit sequences
-(`tools/gen_xt_schema.py`). The corpus holds 67 788 bodies in 281 files, written by 65 versions
-of the modeller (schemas 19008 to 38101); 67 714 parse.
+(`tools/gen_xt_schema.py`). The corpus holds 67 714 bodies in type 114 records, written by 65
+versions of the modeller (schemas 19008 to 38101); all of them parse. (Bytes that look like the
+start of a body turn up elsewhere too, 74 times in the corpus: a record format keeps what was
+in memory after its field names. Those are not bodies.)
 
 **Faces.** A face is a part of a surface inside loops of edges. Planes are triangulated in
 their plane; every other face in the parameters (u, v) of its surface (a constrained Delaunay
