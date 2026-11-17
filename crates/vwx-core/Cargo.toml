@@ -1,0 +1,12 @@
+[package]
+name = "vwx-core"
+description = "Container layer of the VWX reader: header, blocks, compressed streams, analysis tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+flate2.workspace = true
+serde.workspace = true

@@ -1,0 +1,15 @@
+[package]
+name = "vwx-read"
+description = "Semantic readers: a Vectorworks file to the neutral model and viewer meshes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+vwx-core.workspace = true
+vwx-model.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -1,0 +1,33 @@
+# Vectorworks files: never commit (see README, "Test data")
+*.vwx
+*.vwxw
+*.vwxp
+*.mcd
+*.sta
+*.vwx.*
+backup/
+Backup/
+samples/
+exports/
+corpus/
+
+# Build output
+target/
+*.dll
+*.pdb
+*.lib
+*.exp
+*.so
+*.dylib
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Editors / OS
+.vs/
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

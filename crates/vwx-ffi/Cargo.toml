@@ -1,0 +1,18 @@
+[package]
+name = "vwx-ffi"
+description = "C ABI of the VWX reader (vwx.dll)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "vwx"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+vwx-core.workspace = true
+vwx-read.workspace = true
+vwx-model.workspace = true
+serde_json.workspace = true

@@ -1,0 +1,11 @@
+[package]
+name = "vwx-model"
+description = "Neutral, queryable model and viewer meshes produced by the VWX reader"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
