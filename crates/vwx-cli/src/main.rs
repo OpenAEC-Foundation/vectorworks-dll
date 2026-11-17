@@ -6,7 +6,8 @@ use vwx_core::{diff, hex, scan, Probe};
 
 const USAGE: &str = "usage:
   vwx info <file.vwx>                       document facts
-  vwx read <file.vwx>                       read the file; meshes and triangles per mesh
+  vwx read <file.vwx> [--elements]          read the file; meshes and triangles per mesh
+                                            (--elements: bounds and properties per object)
   vwx document <file.vwx>                   the neutral model as JSON
   vwx mesh <file.vwx> [--obj out.obj]       bounds and triangles of the meshes; writes an OBJ
   vwx xt <file> [--errors] [--obj out.obj]  the Parasolid bodies in a file: node types, failures,
@@ -160,6 +161,24 @@ fn run(args: &[String]) -> Result<Option<Value>, String> {
                     Some(sheet) => to(serde_json::to_value(sheet)),
                     None => Err(format!("{path}: no sheet {number}")),
                 };
+            }
+            // --elements: one line per object that is drawn: its id, bounds (metres), triangles,
+            // mesh and properties
+            if args.iter().any(|a| a == "--elements") {
+                for m in &scene.meshes {
+                    for &(id, first, count) in &m.elements {
+                        let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+                        for &v in &m.indices[first as usize..(first + count) as usize] {
+                            for k in 0..3 {
+                                lo[k] = lo[k].min(m.positions[v as usize * 3 + k]);
+                                hi[k] = hi[k].max(m.positions[v as usize * 3 + k]);
+                            }
+                        }
+                        let props = m.props.iter().find(|p| p.0 == id).map(|p| p.1.as_str()).unwrap_or("");
+                        println!("{id}	{:.3} {:.3} {:.3}	{:.3} {:.3} {:.3}	{}	{}	{props}", lo[0], lo[1], lo[2], hi[0], hi[1], hi[2], count / 3, m.name);
+                    }
+                }
+                return Ok(None);
             }
             // --props <text>: the properties of the objects that have that text in them
             if let Some(text) = opt(args, "--props") {

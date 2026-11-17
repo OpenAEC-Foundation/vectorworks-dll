@@ -236,7 +236,10 @@ settings in a record too, the last of its records, whose format has the name of 
 (`Door`, `Window`, `Slab`, `Space`, `Stairs CW`): that name says what the object is. A door or
 window in a wall is a child of the wall. What a plug-in object holds (its 3D parts and its 2D
 shapes) is in its own coordinates: its placement is the matrix at 0xf0 with the offset at 0x138
-(a window of the corpus: offset (2000, 8050, 0), its extrude at (0, 40, 805)).
+(a window of the corpus: offset (2000, 8050, 0), its extrude at (0, 40, 805)). A door or
+window also holds two groups with what cuts its hole out of the wall: a group with user data
+tagged `gchw` and one tagged `ggcw`, each with an extrude of 6 m through the wall. They are not
+parts of the object (drawn, every window of the corpus project is a box of 6 m).
 
 ### Viewports: type 122
 

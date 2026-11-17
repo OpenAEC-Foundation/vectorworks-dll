@@ -179,6 +179,13 @@ fn keeps_drawing(group: &vwx_core::container::Record) -> bool {
     group.bytes.get(0x55) == Some(&1)
 }
 
+/// True for a group that holds what cuts the hole of its object out of a wall: among its
+/// user data is a record tagged `gchw` or `ggcw` (each window and door of the corpus project
+/// has one of each, with an extrude of 6 m through the wall). It is not a part of the object.
+fn cuts_wall(raw: &Raw, group: usize) -> bool {
+    raw.children[group].iter().map(|&t| &raw.records[t]).any(|t| t.kind() == kind::USER_DATA && matches!(t.bytes.get(0x50..0x54), Some(b"gchw" | b"ggcw")))
+}
+
 /// True for the group of a viewport that holds its crop: it starts with user data tagged
 /// `porc` (sample 246).
 fn is_crop(raw: &Raw, group: usize) -> bool {
@@ -719,6 +726,8 @@ impl Builder<'_, '_> {
                     }
                 }
             }
+            // (what cuts the hole of a window or door out of its wall is not drawn)
+            kind::GROUP if cuts_wall(raw, i) => {}
             kind::GROUP => {
                 for &c in &raw.children[i] {
                     self.walk(c, place, nested, key, depth);
@@ -1174,6 +1183,28 @@ mod tests {
         let u = unpacked(records);
         let scene = scene(&Raw::new(&u).unwrap(), Info::default());
         assert_eq!(&scene.meshes[0].positions[..6], &[2.0, 8.05, 0.0, 3.0, 8.05, 0.0]);
+    }
+
+    #[test]
+    fn what_cuts_the_hole_of_a_window_is_not_drawn() {
+        // a window with a line, and a group tagged `gchw` with the shape that cuts its wall
+        let object = record(kind::PLUG_IN_OBJECT, 433, &[(0xf0, 1.0), (0x110, 1.0), (0x130, 1.0)]);
+        let mut tag = record(kind::USER_DATA, 84, &[]);
+        tag[0x50..0x54].copy_from_slice(b"gchw");
+        let records = vec![
+            tagged(layer("L", 0.0), 1, 1, 0),
+            tagged(object, 2, 0, 0),
+            tagged(pen(record(kind::LINE, 140, &[(0x80, 1000.0)])), 3, 0, 0),
+            tagged(record(kind::GROUP, 204, &[]), 3, 0, 0),
+            tagged(tag, 4, 0, 0),
+            tagged(pen(record(kind::LINE, 140, &[(0x80, 6000.0)])), 4, 0, 0),
+            tagged(record(kind::END, 88, &[]), 4, 0, 0),
+            tagged(record(kind::END, 88, &[]), 3, 0, 0),
+            tagged(record(kind::END, 88, &[]), 2, 0, 0),
+        ];
+        let u = unpacked(records);
+        let scene = scene(&Raw::new(&u).unwrap(), Info::default());
+        assert_eq!(scene.meshes[0].positions, [0.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
     }
 
     #[test]
