@@ -117,6 +117,25 @@ pub struct Scene {
     pub meshes: Vec<Mesh>,
     /// The views saved in the document.
     pub views: Vec<View>,
+    /// The texts on the design layers.
+    pub texts: Vec<Text>,
+}
+
+/// A text of the document (metres, Z up).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Text {
+    /// The object it is.
+    pub id: u64,
+    /// The name of its layer.
+    pub layer: String,
+    pub text: String,
+    /// The top left corner of its box, and the width and height of the box.
+    pub at: [f32; 3],
+    pub width: f32,
+    pub height: f32,
+    /// The size of its letters in points on paper.
+    pub size: f32,
+    pub lines: u16,
 }
 
 /// A saved view: the way the model is looked at (Z up; unit vectors).

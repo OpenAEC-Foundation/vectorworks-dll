@@ -72,7 +72,8 @@ const DEFAULT_COLOR: [u8; 3] = [200, 200, 204];
 pub fn scene(raw: &Raw, info: Info) -> Scene {
     let mut builder = Builder { raw, batches: BTreeMap::new(), elevation: 0.0, bodies: HashMap::new() };
     for (i, r) in raw.records.iter().enumerate() {
-        if r.kind() != kind::LAYER {
+        // a sheet layer is paper, not part of the model
+        if r.kind() != kind::LAYER || raw::layer_is_sheet(r.bytes) {
             continue;
         }
         // 3D objects hold their height in the document; 2D shapes lie on their layer
@@ -113,7 +114,33 @@ pub fn scene(raw: &Raw, info: Info) -> Scene {
     if meshes.iter().all(|m| m.hidden) {
         meshes.iter_mut().for_each(|m| m.hidden = false);
     }
-    Scene { info, meshes, views: views(raw) }
+    Scene { info, meshes, views: views(raw), texts: texts(raw) }
+}
+
+/// The texts that lie on the design layers themselves (not those inside symbols and other
+/// objects), on the elevation of their layer.
+fn texts(raw: &Raw) -> Vec<vwx_model::Text> {
+    let mut out = Vec::new();
+    for (i, layer) in raw.records.iter().enumerate() {
+        if layer.kind() != kind::LAYER || raw::layer_is_sheet(layer.bytes) {
+            continue;
+        }
+        let (name, z) = (raw::layer_name(layer.bytes).unwrap_or_default(), raw::layer_elevation(layer.bytes));
+        for &c in &raw.children[i] {
+            let Some(t) = Some(&raw.records[c]).filter(|r| r.kind() == kind::TEXT).and_then(shapes::text) else { continue };
+            out.push(vwx_model::Text {
+                id: c as u64,
+                layer: name.clone(),
+                text: t.text,
+                at: [t.at[0], t.at[1], z].map(|v| (v * SCALE) as f32),
+                width: (t.width * SCALE) as f32,
+                height: (t.height * SCALE) as f32,
+                size: t.size as f32,
+                lines: t.lines,
+            });
+        }
+    }
+    out
 }
 
 /// The saved views of a document: a type 49 record each, named in the name list, with the way
@@ -169,6 +196,8 @@ impl Builder<'_, '_> {
             };
             // what is in an invisible class starts switched off
             let hidden = raw.by_ref.get(&key.1).is_some_and(|&class| raw::class_hidden(raw.records[class].bytes));
+            // and so does what is on an invisible layer
+            let hidden = hidden || raw.records.get(key.0).is_some_and(|layer| raw::layer_hidden(layer.bytes));
             Batch { mesh: Mesh { name, color: DEFAULT_COLOR.map(|c| c as f32 / 255.0), colors: Some(Vec::new()), hidden, ..Mesh::default() } }
         })
     }
@@ -472,7 +501,7 @@ impl Builder<'_, '_> {
                     if shapes::filled(r) {
                         self.face(key, &world, color, place.mirrors());
                     } else {
-                        self.stroke(key, &world, pen, true);
+                        self.stroke(key, &world, pen, shapes::closed(r));
                     }
                 } else if let Some(points) = (r.kind() == kind::ARC).then(|| shapes::arc(r)).flatten() {
                     let world: Vec<P3> = points.iter().map(|p| place.apply([p[0], p[1], z])).collect();
@@ -923,6 +952,53 @@ mod tests {
         assert_eq!(m.line_elements[1], (2, 2, 8));
         assert_eq!(&m.positions[..6], &[0.0, 0.0, 3.0, 1.0, 0.0, 3.0]);
         assert_eq!(m.normals.len(), m.positions.len());
+    }
+
+    #[test]
+    fn what_is_on_an_invisible_layer_starts_hidden() {
+        let rect = || {
+            let mut r = record(kind::RECTANGLE, 188, &[(0xa4, 1.0), (0xac, 1000.0), (0xb4, 500.0)]);
+            r[0x64] = 1;
+            r
+        };
+        // as the second layer of sample 151
+        let mut off = layer("Tweede laag", 0.0);
+        off[0xd8..0xda].copy_from_slice(&[0xff, 0xff]);
+        let records = vec![
+            tagged(layer("L", 0.0), 1, 1, 0),
+            tagged(rect(), 2, 0, 0),
+            tagged(record(kind::END, 88, &[]), 2, 0, 0),
+            tagged(off, 1, 2, 0),
+            tagged(rect(), 3, 0, 0),
+            tagged(record(kind::END, 88, &[]), 3, 0, 0),
+        ];
+        let u = unpacked(records);
+        let scene = scene(&Raw::new(&u).unwrap(), Info::default());
+        assert_eq!(scene.meshes.iter().map(|m| (m.name.as_str(), m.hidden)).collect::<Vec<_>>(), [("L", false), ("Tweede laag", true)]);
+    }
+
+    #[test]
+    fn sheet_layers_are_not_part_of_the_model() {
+        let rect = || {
+            let mut r = record(kind::RECTANGLE, 188, &[(0xa4, 1.0), (0xac, 1000.0), (0xb4, 500.0)]);
+            r[0x64] = 1;
+            r
+        };
+        let mut sheet = layer("001", 0.0);
+        sheet[0x24c] = 2;
+        let mut design = layer("L", 0.0);
+        design[0x24c] = 1;
+        let records = vec![
+            tagged(design, 1, 1, 0),
+            tagged(rect(), 2, 0, 0),
+            tagged(record(kind::END, 88, &[]), 2, 0, 0),
+            tagged(sheet, 1, 2, 0),
+            tagged(rect(), 3, 0, 0),
+            tagged(record(kind::END, 88, &[]), 3, 0, 0),
+        ];
+        let u = unpacked(records);
+        let scene = scene(&Raw::new(&u).unwrap(), Info::default());
+        assert_eq!(scene.meshes.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), ["L"]);
     }
 
     #[test]

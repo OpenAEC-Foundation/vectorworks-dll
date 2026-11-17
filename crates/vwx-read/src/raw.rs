@@ -9,6 +9,7 @@ use vwx_core::{le, Result};
 pub mod kind {
     pub const END: u8 = 0;
     pub const LINE: u8 = 2;
+    pub const TEXT: u8 = 10;
     pub const RECTANGLE: u8 = 3;
     pub const OVAL: u8 = 4;
     pub const POLYGON: u8 = 5;
@@ -146,6 +147,19 @@ pub fn layer_name(record: &[u8]) -> Option<String> {
 /// scripting interface gives for the visibility of a class (0, -1, 2).
 pub fn class_hidden(record: &[u8]) -> bool {
     record.get(0x19) == Some(&kind::CLASS) && record.get(0xb6) == Some(&0xff)
+}
+
+/// True for a sheet layer (a drawing sheet with viewports) rather than a design layer: the byte
+/// at 0x24c of a layer record is 1 for a design layer and 2 for a sheet layer (the five sheets
+/// of `Residential New Construction.sta`; the numbers the scripting interface gives).
+pub fn layer_is_sheet(record: &[u8]) -> bool {
+    record.get(0x24c) == Some(&2)
+}
+
+/// True for a layer that is set invisible: the `i16` at 0xd8 of a layer record is 0 for a
+/// visible layer, -1 for an invisible one and 2 for a greyed one (samples 150, 151, 152).
+pub fn layer_hidden(record: &[u8]) -> bool {
+    le::u16(record, 0xd8) == Some(0xffff)
 }
 
 pub fn layer_elevation(record: &[u8]) -> f64 {

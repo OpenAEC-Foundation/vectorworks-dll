@@ -129,7 +129,9 @@ and bit 0x80 of the byte at 0x50 says objects take the class attributes when mad
 **Layers (type 31).** Reference number at 0x1a, elevation `f64` at 0x20e (pair 90/95), the name:
 `u32le` length in bytes at 0x2a2, UTF-16LE text. After it 4 bytes and a second text the same
 way, the level the layer belongs to (`Top of Slab`, `Finish Floor` in
-`Residential New Construction.sta`; empty in a new document). The children of the
+`Residential New Construction.sta`; empty in a new document). The byte at 0x24c is 1 for a
+design layer and 2 for a sheet layer (the numbers the scripting interface gives). The `i16` at
+0xd8 is the visibility of the layer: 0 visible, -1 invisible, 2 greyed (samples 150, 151, 152). The children of the
 record are the objects on the layer.
 
 **Colour palette.** The `TDMD` record with key `DCDN` (see below): fields 2, 3, 4, 5 are cyan,
@@ -169,12 +171,13 @@ Every drawn object starts alike:
 | Offset | Type | Content |
 |---|---|---|
 | 0x50 | `u32` | 2 (not known) |
-| 0x54 | `u16` | 4 for 2D objects, 1 for a locus, 2 for an extrude (not known) |
+| 0x54 | `u16` | line weight in thousandths of an inch (4 by default; pair 02/104: 40) |
 | 0x56 | `u16` | palette index, 257 by default (fill foreground, assumed) |
 | 0x58 | `u16` | palette index of the fill (pair 10/41: 256 white to 1237 red) |
 | 0x5a | `u16` | palette index of the pen (pair 02/42: 257 black to 1238 blue) |
 | 0x5c | `u16` | palette index, 256 by default (pen background, assumed) |
-| 0x5e | 2 x `u8` | 100, 100 (opacities, assumed) |
+| 0x5e | 2 x `u8` | opacity of fill and pen in percent (sample 103: 40, 40) |
+| 0x64 | `u32` | the fill: 0 none (sample 102), 1 solid |
 | 0x68 | 4 x `f64` | bounding box in plan: top, left, bottom, right |
 
 | Type | Size | Payload after the common part |
@@ -182,7 +185,8 @@ Every drawn object starts alike:
 | 2 line | 140 | instead of the bounding box: y1, x1, y2, x2 (samples 02, 03, 04, 07) |
 | 17 locus | 120 | y, x at 0x68 (sample 18) |
 | 3 rectangle, 4 oval | 188 | origin (y, x) at 0x8c; direction (y, x) at 0x9c; width along the direction at 0xac; height to its left at 0xb4. An oval is the ellipse in that frame (samples 10, 11, 12, 17) |
-| 5 polygon | 0x90 + 16n | `u16` count at 0x8e; points (y, x) from 0x90 (samples 13, 14) |
+| 5 polygon | 0x90 + 16n | the byte at 0x8d is 1 when its last point is joined to its first (pair 190/191); `u16` count at 0x8e; points (y, x) from 0x90 (samples 13, 14) |
+| 10 text | | the box around it at 0x68 (top, left, bottom, right); `u16` count of characters at 0xa6; `u16` count of lines at 0x100, two more `u16`, and from 0x106 a `u16` per line (the number of its first character); then the size of the letters in points as an `f64`; the characters as UTF-16 at the end of the record, a carriage return between lines (samples 160 to 164) |
 | 6 arc | 210 | start point at 0x90, end point at 0xa0, centre at 0xb0 (each y, x); at 0xc0 an angle a and at 0xc8 the sweep, in degrees: the arc runs from 90 - (a + sweep) to 90 - a, counter-clockwise from the x axis (samples 15, 16) |
 | 25 3D polygon | 0xd2 + 24n | six `f64` at 0x9c (largest then smallest x, y, z); `u16` count at 0xd0; points from 0xd2 (sample 30) |
 | 24 extrude | 324 | addresses of its first and last child at 0x8c, 0x94; local box at 0x9c (largest then smallest x, y, z); placement at 0xcc; bottom and top along local z at 0x130, 0x138. The children are the profile, 2D objects in the local xy plane (samples 20 to 27) |
@@ -201,6 +205,33 @@ Every drawn object starts alike:
 | 21 polyline | 0x90 + 36n | `u16` count at 0x8e; vertices of 36 bytes from 0x90: y, x, a `u32` whose second byte is the kind of vertex (0 corner, 1 Bezier, 3 arc), an `f64` radius, 8 bytes. A Bezier vertex is the control point of a quadratic curve, an arc vertex a corner rounded by a circle of that radius (0: as large as fits); a curve runs from and to a neighbouring corner, and half way to a neighbour that is a curve itself. As a profile its type 42 child has Vectorworks' own points of it (samples 111, 113) |
 | 13 rounded rectangle | 204 | as the rectangle, then the width and height of the ellipse its corners are quarters of at 0xbc and 0xc4 (samples 112, 220) |
 | 68 wall | 2274+ | children: plan graphics (lines, polygons), a record, and a CSG solid with the wall's body |
+
+### Records: types 47 and 48
+
+A **record format** (type 47) has its name in the name list under its reference number. A `u32`
+count of fields at 0x50; from 0x60 a block of 136 bytes per field: `u16` kind, `u16` offset of
+the field's value in a record, 4 bytes, and the name as UTF-16 ending in a zero in 128 bytes
+(what follows the zero is whatever was in memory). Kinds by the room their value takes, found
+from the offsets of 152 formats: 1 integer (4 bytes), 2 boolean (2), 4 text (8); 3, 7, 10, 11,
+20, 21, 22 numbers (10: an `f64` and two more bytes); 8, 9, 14, 18, 19 take 8 bytes as text does
+(lists to choose from); 23 to 26, 29, 30 take 4, 28 takes 2, 27 takes 1.
+
+A **record** (type 48) is a child of the object it is attached to: `u32` reference number of
+its format at 0x50, a `u16` count of bytes to pass over at 0x54 (none, or one per field), then
+the fixed part with each value at its field's offset, then the texts. A text value is a `u32`
+length in bytes and a `u32` place counted from the start of the fixed part; a choice holds the
+chosen text first, then the others, zeros between (sample 90: format `Gegevens`, field `Naam`,
+value `Balk-1`; 1033 of the 1083 records of `Residential New Construction.sta` have exactly the
+length this gives).
+
+Vectorworks keeps the **IFC data** of an object in such records: `NNA_IfcDoor`, `NNA_TIfcDoor`
+or `NNA_4IfcDoor` (IFC 4) for the entity, `NNA_Pset_...` for property sets; their fields come in
+pairs `prm0_name`, `prm0_value` (`GlobalId`, `3UrNonhr...`).
+
+A **plug-in object** (type 86: door, window, slab, space, stair, title block, ..) holds its
+settings in a record too, the last of its records, whose format has the name of the plug-in
+(`Door`, `Window`, `Slab`, `Space`, `Stairs CW`): that name says what the object is. A door or
+window in a wall is a child of the wall.
 
 ### Saved views: types 49 and 43
 
@@ -282,6 +313,6 @@ type 85 child is a mesh (see the table above).
 
 ### Not decoded yet
 
-Text (10), cubic vertices of polylines, NURBS curve (111) on its own, slab (71), plug-in object (86), viewport
+Viewports (122) and what a sheet layer shows, cubic vertices of polylines, NURBS curve (111) on its own, slab (71), plug-in object (86), viewport
 (122), records and formats (47, 48), styles (102, 107, 127), what a saved view shows (its `svdn` and `ccst` user data), sheet layers, class
 attributes and visibility.

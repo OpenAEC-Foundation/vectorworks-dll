@@ -167,6 +167,7 @@ fn run(args: &[String]) -> Result<Option<Value>, String> {
                     "name": m.name, "triangles": m.indices.len() / 3, "lines": m.lines.len() / 2, "objects": m.props.len(), "hidden": m.hidden,
                 })).collect::<Vec<_>>(),
                 "views": scene.views,
+                "texts": scene.texts,
             })))
         }
         "mesh" => {

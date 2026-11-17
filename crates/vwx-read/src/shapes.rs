@@ -460,6 +460,39 @@ pub fn fill_index(r: &Record) -> Option<u16> {
     le::u16(r.bytes, 0x58)
 }
 
+/// True for a polygon or polyline (types 5 and 21) whose last point is joined to its first:
+/// the byte at 0x8d (pair 190/191). Other shapes are closed by what they are.
+pub fn closed(r: &Record) -> bool {
+    !matches!(r.kind(), kind::POLYGON | kind::POLYLINE) || r.bytes.get(0x8d) != Some(&0)
+}
+
+/// A text (type 10) as it lies in the plane of its layer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Text {
+    pub text: String,
+    /// The box around it: its top left corner, its width and its height.
+    pub at: P2,
+    pub width: f64,
+    pub height: f64,
+    /// The size of its letters in points.
+    pub size: f64,
+    pub lines: u16,
+}
+
+/// A text (type 10): the box around it at 0x68 (top, left, bottom, right); a `u16` count of
+/// characters at 0xa6; a `u16` count of lines at 0x100, two more `u16` and from 0x106 a `u16`
+/// per line, the number of its first character; then the size of its letters in points as an
+/// `f64`; its characters as UTF-16 at the end of the record, a carriage return between its
+/// lines (samples 160 to 164).
+pub fn text(r: &Record) -> Option<Text> {
+    let (top, left, bottom, right) = (real(r, 0x68)?, real(r, 0x70)?, real(r, 0x78)?, real(r, 0x80)?);
+    let count = le::u16(r.bytes, 0xa6)? as usize;
+    let characters = r.bytes.get(r.bytes.len().checked_sub(2 * count)?..)?;
+    let text = crate::raw::utf16(characters).replace('\r', "\n");
+    let lines = le::u16(r.bytes, 0x100)?;
+    Some(Text { text, at: [left, top], width: right - left, height: top - bottom, size: real(r, 0x106 + 2 * lines as usize)?, lines })
+}
+
 /// The palette index of the pen colour of a drawn object (`u16` at 0x5a).
 pub fn pen_index(r: &Record) -> Option<u16> {
     le::u16(r.bytes, 0x5a)
@@ -554,6 +587,27 @@ pub(crate) mod tests {
         assert!(!filled(&rec(&rect)));
         rect[0x64] = 1;
         assert!(filled(&rec(&rect)));
+    }
+
+    #[test]
+    fn text_as_sample_161() {
+        // "Hallo wereld" of 12 points with its top left corner at (1000, 500)
+        let mut b = record(kind::TEXT, 0x19c, &[(0x68, 500.0), (0x70, 1000.0), (0x78, 402.63), (0x80, 1467.57), (0x108, 12.0)]);
+        b[0xa6] = 12;
+        b[0x100] = 1;
+        b.extend("Hallo wereld".encode_utf16().flat_map(u16::to_le_bytes));
+        let t = text(&rec(&b)).unwrap();
+        assert_eq!((t.text.as_str(), t.at, t.size, t.lines), ("Hallo wereld", [1000.0, 500.0], 12.0, 1));
+        assert!((t.width - 467.57).abs() < 1e-9 && (t.height - 97.37).abs() < 1e-9);
+    }
+
+    #[test]
+    fn open_and_closed_polygons() {
+        let mut b = record(kind::POLYGON, 208, &[]);
+        assert!(!closed(&rec(&b)));
+        b[0x8d] = 1;
+        assert!(closed(&rec(&b)));
+        assert!(closed(&rec(&record(kind::RECTANGLE, 188, &[]))));
     }
 
     #[test]
