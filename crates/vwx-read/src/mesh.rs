@@ -570,7 +570,9 @@ impl Builder<'_, '_> {
                 let value = match value {
                     crate::records::Value::Integer(v) => v.into(),
                     crate::records::Value::Boolean(v) => v.into(),
-                    crate::records::Value::Number(v) => v.into(),
+                    crate::records::Value::Number(v) | crate::records::Value::Date(v) => v.into(),
+                    crate::records::Value::Reference(v) => v.into(),
+                    crate::records::Value::Colour(v) => v.into(),
                     crate::records::Value::Text(v) if v.is_empty() => continue,
                     crate::records::Value::Text(v) => v.into(),
                 };

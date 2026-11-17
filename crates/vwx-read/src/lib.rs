@@ -19,6 +19,7 @@
 
 pub mod coverage;
 pub mod dmdt;
+pub mod docinfo;
 pub mod kinds;
 pub mod mesh;
 pub mod objects;
@@ -103,7 +104,17 @@ fn document(raw: &Raw, info: Info) -> Document {
 pub fn open(data: &[u8]) -> Result<Document> {
     let unpacked = unpack(data)?;
     let raw = Raw::new(&unpacked)?;
-    Ok(document(&raw, info_of(&unpacked, data.len(), 0)))
+    let mut doc = document(&raw, info_of(&unpacked, data.len(), 0));
+    doc.settings = docinfo::settings(&unpacked, &raw);
+    link_layers(&mut doc.layers, &doc.settings.stories);
+    Ok(doc)
+}
+
+/// Gives each layer the story it belongs to: the story that has a level on it.
+fn link_layers(layers: &mut [Layer], stories: &[vwx_model::Story]) {
+    for layer in layers.iter_mut() {
+        layer.story = stories.iter().find(|s| s.layers.contains(&layer.name)).map(|s| s.name.clone());
+    }
 }
 
 /// Reads a document and makes the meshes a viewer draws.
@@ -113,6 +124,15 @@ pub fn read(data: &[u8]) -> Result<Scene> {
     let objects = raw.records.iter().filter(|r| !matches!(r.kind(), kind::END | kind::USER_DATA)).count();
     let mut scene = mesh::scene(&raw, info_of(&unpacked, data.len(), objects));
     scene.plans = plan::plans(&raw);
+    let settings = docinfo::settings(&unpacked, &raw);
+    scene.units = settings.units;
+    scene.origin = settings.origin;
+    scene.georeference = settings.georeference;
+    scene.stories = settings.stories;
+    scene.level_types = settings.level_types;
+    scene.level_templates = settings.level_templates;
+    scene.project = settings.project;
+    scene.page = settings.page;
     Ok(scene)
 }
 

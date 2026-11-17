@@ -22,21 +22,37 @@ pub enum Kind {
     /// A length and a place in the record, where its UTF-16 text is. A choice from a list is
     /// kept this way too, the chosen text first.
     Text,
+    /// A date and time as a number: days since 1 January 1904, the time of day in the fraction.
+    /// Held like a number (10 bytes), told apart by the style of the field.
+    Date,
+    /// A number of 4 bytes naming something by its reference number: a class, a material, a
+    /// texture or a symbol definition (0 or -1: none).
+    Reference,
+    /// A colour: the palette index in 2 bytes.
+    Colour,
+    /// A whole number of one byte: a pen weight.
+    Byte,
     /// Kinds whose values are not decoded.
     Other,
 }
 
 impl Kind {
-    /// The kind of a field from its number in the format: 1 integer, 2 boolean, 4 text; the
-    /// numbers 3, 7, 10, 11, 20, 21 and 22 take 10 bytes each and hold a number; 8, 9, 14, 18
-    /// and 19 take 8 bytes as text does (seen on the corpus: lists to choose from). The others
-    /// (23 to 30) take 1, 2 or 4 bytes.
-    fn of(number: u16) -> Kind {
+    /// The kind of a field from its number in the format and its style: 1 integer, 2 boolean, 4
+    /// text; the numbers 3, 7, 10, 11, 20, 21 and 22 take 10 bytes each and hold a number (3 with
+    /// the style 7 a date, see `docs/FORMAT.md`); 8, 9, 14, 18 and 19 take 8 bytes as text does
+    /// (seen on the corpus: lists to choose from); 16 (a dimension standard), 25 (a fill) and 26
+    /// (a line style) are whole numbers of 4 bytes; 23, 24, 29 and 30 references of 4 bytes; 27 a
+    /// pen weight of one byte; 28 a palette index of two bytes.
+    fn of(number: u16, style: u16) -> Kind {
         match number {
-            1 => Kind::Integer,
+            1 | 16 | 25 | 26 => Kind::Integer,
             2 => Kind::Boolean,
+            3 if style & 0xff == 7 => Kind::Date,
             3 | 7 | 10 | 11 | 20 | 21 | 22 => Kind::Number,
             4 | 8 | 9 | 14 | 18 | 19 => Kind::Text,
+            23 | 24 | 29 | 30 => Kind::Reference,
+            27 => Kind::Byte,
+            28 => Kind::Colour,
             _ => Kind::Other,
         }
     }
@@ -48,6 +64,9 @@ pub struct Field {
     pub kind: Kind,
     /// Where its value is in the fixed part of a record.
     pub offset: usize,
+    /// The style of the field: the high half of the `u32` after its offset (how a number is
+    /// shown: decimals, angle, date; the labels of a boolean).
+    pub style: u16,
 }
 
 /// A value of a field.
@@ -57,6 +76,12 @@ pub enum Value {
     Boolean(bool),
     Number(f64),
     Text(String),
+    /// A date: days since 1 January 1904.
+    Date(f64),
+    /// A reference number of a class, material, texture or symbol definition.
+    Reference(i64),
+    /// A palette index.
+    Colour(u16),
 }
 
 /// The fields of a record format (type 47): a `u32` count at 0x50; from 0x60 a block of 136
@@ -69,7 +94,12 @@ pub fn format(r: &Record) -> Option<Vec<Field>> {
         let at = 0x60 + 136 * k;
         let name = r.bytes.get(at + 8..at + 136)?;
         let end = name.as_chunks::<2>().0.iter().position(|c| *c == [0, 0]).map_or(name.len(), |n| 2 * n);
-        fields.push(Field { name: utf16(&name[..end]), kind: Kind::of(le::u16(r.bytes, at)?), offset: le::u16(r.bytes, at + 2)? as usize });
+        fields.push(Field {
+            name: utf16(&name[..end]),
+            style: le::u16(r.bytes, at + 6)?,
+            kind: Kind::of(le::u16(r.bytes, at)?, le::u16(r.bytes, at + 6)?),
+            offset: le::u16(r.bytes, at + 2)? as usize,
+        });
     }
     Some(fields)
 }
@@ -95,6 +125,10 @@ pub fn values(r: &Record, fields: &[Field]) -> Vec<(String, Value)> {
             Kind::Integer => le::u32(body, at).map(|v| Value::Integer(i64::from(v as i32))),
             Kind::Boolean => le::u16(body, at).map(|v| Value::Boolean(v != 0)),
             Kind::Number => le::f64(body, at).filter(|v| v.is_finite() && body.len() >= at + 10).map(Value::Number),
+            Kind::Date => le::f64(body, at).filter(|v| v.is_finite() && body.len() >= at + 10).map(Value::Date),
+            Kind::Reference => le::u32(body, at).map(|v| Value::Reference(i64::from(v as i32))),
+            Kind::Colour => le::u16(body, at).map(Value::Colour),
+            Kind::Byte => body.get(at).map(|&v| Value::Integer(i64::from(v))),
             Kind::Text => (|| {
                 let (len, place) = (le::u32(body, at)? as usize, le::u32(body, at + 4)? as usize);
                 let text = utf16(body.get(place..place.checked_add(len.min(MAX_TEXT))?)?);
@@ -215,7 +249,7 @@ pub(crate) mod tests {
     fn record_of_sample_90() {
         let format_bytes = format_record(&[("Naam", 4, 0)]);
         let fields = format(&Record { offset: 0, bytes: &format_bytes }).unwrap();
-        assert_eq!(fields, [Field { name: "Naam".into(), kind: Kind::Text, offset: 0 }]);
+        assert_eq!(fields, [Field { name: "Naam".into(), kind: Kind::Text, offset: 0, style: 0 }]);
         let record_bytes = sample_90();
         assert_eq!(record_bytes.len(), 107);
         let r = Record { offset: 0, bytes: &record_bytes };
@@ -226,7 +260,7 @@ pub(crate) mod tests {
     #[test]
     fn numbers_booleans_and_choices() {
         // an integer, a boolean, a number of 10 bytes and a choice, without bytes to pass over
-        let fields = format(&Record { offset: 0, bytes: &format_record(&[("Count", 1, 0), ("On", 2, 4), ("Length", 7, 6), ("Mode", 8, 16), ("Other", 27, 24)]) }).unwrap();
+        let fields = format(&Record { offset: 0, bytes: &format_record(&[("Count", 1, 0), ("On", 2, 4), ("Length", 7, 6), ("Mode", 8, 16), ("Other", 31, 24)]) }).unwrap();
         let mut r = record(kind::RECORD, 0x56, &[]);
         r.extend((-3i32).to_le_bytes());
         r.extend(1u16.to_le_bytes());
@@ -243,6 +277,39 @@ pub(crate) mod tests {
         );
         // a record cut short gives what is there
         assert_eq!(values(&Record { offset: 0, bytes: &r[..0x5c] }, &fields).len(), 2);
+    }
+
+    #[test]
+    fn dates_references_colours_and_weights() {
+        // a format with the style in the high half of the word after the offset
+        let mut f = format_record(&[("When", 3, 0), ("Class", 23, 10), ("Pen", 28, 14), ("Weight", 27, 16), ("Fill", 25, 18), ("Std", 16, 22)]);
+        f[0x60 + 6..0x60 + 8].copy_from_slice(&7u16.to_le_bytes());
+        let fields = format(&Record { offset: 0, bytes: &f }).unwrap();
+        assert_eq!(fields[0].kind, Kind::Date);
+        let kinds: Vec<Kind> = fields.iter().map(|f| f.kind).collect();
+        assert_eq!(kinds, [Kind::Date, Kind::Reference, Kind::Colour, Kind::Byte, Kind::Integer, Kind::Integer]);
+        let mut r = record(kind::RECORD, 0x56, &[]);
+        // 2025-06-16 12:00 is 44362.5 days after 1 January 1904
+        r.extend(44362.5f64.to_le_bytes());
+        r.extend([0, 0]);
+        r.extend((-1i32).to_le_bytes());
+        r.extend(1237u16.to_le_bytes());
+        r.push(7);
+        r.push(0);
+        r.extend(1i32.to_le_bytes());
+        r.extend(999i32.to_le_bytes());
+        let got = values(&Record { offset: 0, bytes: &r }, &fields);
+        assert_eq!(
+            got,
+            [
+                ("When".to_string(), Value::Date(44362.5)),
+                ("Class".to_string(), Value::Reference(-1)),
+                ("Pen".to_string(), Value::Colour(1237)),
+                ("Weight".to_string(), Value::Integer(7)),
+                ("Fill".to_string(), Value::Integer(1)),
+                ("Std".to_string(), Value::Integer(999)),
+            ]
+        );
     }
 
     #[test]

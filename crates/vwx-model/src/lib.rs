@@ -34,6 +34,24 @@ pub struct Layer {
     /// Wall height of the layer (metres), when set.
     pub height: Option<f64>,
     pub visible: bool,
+    /// The scale of the layer, 1 : `scale` (0 when not read).
+    #[serde(default)]
+    pub scale: f64,
+    /// The level type the layer is linked to ("Top of Slab"), empty when none.
+    #[serde(default)]
+    pub level: String,
+    /// The story it belongs to, by name, when it does.
+    #[serde(default)]
+    pub story: Option<String>,
+    /// Greyed (shown dimmed) rather than shown normally.
+    #[serde(default)]
+    pub greyed: bool,
+    /// Thickness of the layer (metres), where the layer has one.
+    #[serde(default)]
+    pub thickness: Option<f64>,
+    /// Opacity of what is on the layer, 0..1 (1: fully opaque), when the layer sets one.
+    #[serde(default)]
+    pub opacity: Option<f64>,
 }
 
 /// A class (Vectorworks' second organisation next to layers).
@@ -80,6 +98,8 @@ pub struct Document {
     pub layers: Vec<Layer>,
     pub classes: Vec<Class>,
     pub objects: Vec<Object>,
+    #[serde(default)]
+    pub settings: DocumentSettings,
 }
 
 /// A triangle mesh for a viewer: one per layer/class/material batch.
@@ -127,6 +147,193 @@ pub struct Scene {
     /// The plan of each design layer with 2D line work: what the top/plan view shows.
     #[serde(default)]
     pub plans: Vec<Plan>,
+    /// The units the document is set in, its origin, georeference and project data.
+    #[serde(default)]
+    pub units: Units,
+    #[serde(default)]
+    pub origin: Origin,
+    #[serde(default)]
+    pub georeference: Option<Georeference>,
+    /// The stories of the building, lowest first, with their levels and layers.
+    #[serde(default)]
+    pub stories: Vec<Story>,
+    /// The level types a layer can be linked to ("Top of Slab", "Finish Floor").
+    #[serde(default)]
+    pub level_types: Vec<String>,
+    /// The levels a new story gets.
+    #[serde(default)]
+    pub level_templates: Vec<LevelTemplate>,
+    #[serde(default)]
+    pub project: ProjectInfo,
+    #[serde(default)]
+    pub page: Page,
+}
+
+/// Everything a document says about itself besides its objects: what [`Scene`] carries at its
+/// top level, for [`Document`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DocumentSettings {
+    pub units: Units,
+    pub origin: Origin,
+    pub georeference: Option<Georeference>,
+    pub stories: Vec<Story>,
+    pub level_types: Vec<String>,
+    pub level_templates: Vec<LevelTemplate>,
+    pub project: ProjectInfo,
+    pub page: Page,
+}
+
+/// How a length is written.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnitFormat {
+    /// 1.25 m
+    #[default]
+    Decimal,
+    /// 1 1/4 inch
+    Fractional,
+    /// 3' 4.5"
+    DecimalFeetInches,
+    /// 3' 4 1/2"
+    FractionalFeetInches,
+}
+
+/// One set of units (the document has a primary and a secondary one).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct UnitSystem {
+    /// Name of the length unit as the document gives it ("Millimeter", "Feet & Inches").
+    pub name: String,
+    /// The mark shown after a length ("mm").
+    pub mark: String,
+    pub format: UnitFormat,
+    /// Drawing units per inch: 25.4 for millimetres, 1 for inches.
+    pub units_per_inch: f64,
+    /// Metres in one drawing unit (0.001 for millimetres, 0.0254 for inches).
+    pub metres_per_unit: f64,
+    /// Decimals shown for lengths, or the fraction precision as the document counts it.
+    pub display_precision: u32,
+    /// The same for dimensions.
+    pub dimension_precision: u32,
+    pub leading_zero: bool,
+    pub trailing_zeros: bool,
+    pub show_mark: bool,
+    pub thousands_separator: bool,
+    pub area_name: String,
+    pub area_mark: String,
+    /// Area units in one square inch.
+    pub area_units_per_square_inch: f64,
+    pub area_precision: u32,
+    pub volume_name: String,
+    pub volume_mark: String,
+    /// Volume units in one cubic inch.
+    pub volume_units_per_cubic_inch: f64,
+    pub volume_precision: u32,
+}
+
+/// How an angle is written.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AngleUnit {
+    #[default]
+    Degrees,
+    Radians,
+    Gradians,
+}
+
+/// The units of a document. Coordinates inside the file are millimetres whatever these are; the
+/// reader has converted them to metres already, so these only say how to *show* values.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Units {
+    pub primary: UnitSystem,
+    pub secondary: UnitSystem,
+    pub angle: AngleUnit,
+}
+
+/// The user origin: where the coordinates the user sees start, in the coordinates of the model
+/// (metres, x right, y up).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct Origin {
+    pub x: f64,
+    pub y: f64,
+}
+
+/// A georeference: where on Earth the origin of the model lies.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Georeference {
+    /// Degrees, positive north / east.
+    pub latitude: f64,
+    pub longitude: f64,
+    /// The angle between the y axis of the model and true north, in degrees.
+    pub angle_to_north: f64,
+    /// Elevation of the project above the datum (metres).
+    pub project_elevation: f64,
+    /// The coordinate system as Well Known Text, as the document keeps it.
+    pub wkt: String,
+    /// The EPSG code of the coordinate system, when the text names one.
+    pub epsg: Option<u32>,
+    /// Name of the coordinate system ("Amersfoort / RD New").
+    pub crs_name: String,
+}
+
+/// A level of a story: a layer's place in it (a floor, a ceiling).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Level {
+    /// The level type: "Finish Floor", "Top of Slab".
+    pub name: String,
+    /// Elevation above the story (metres).
+    pub elevation: f64,
+    /// The layer of the level; empty for a level without one.
+    pub layer: String,
+}
+
+/// A story of a building.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Story {
+    pub name: String,
+    /// What is added to the name of its layers.
+    pub suffix: String,
+    /// Elevation of the story (metres).
+    pub elevation: f64,
+    pub levels: Vec<Level>,
+    /// The names of the design layers that belong to it.
+    pub layers: Vec<String>,
+}
+
+/// A level that a new story is given.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LevelTemplate {
+    /// Name of the layer made for it; empty: the level has no layer.
+    pub layer: String,
+    /// 1 : `scale` for that layer.
+    pub scale: f64,
+    pub level_type: String,
+    /// Elevation in the story, and the height of walls on its layer (metres).
+    pub elevation: f64,
+    pub wall_height: f64,
+}
+
+/// The project data of the title block (name, number, address, ...).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProjectInfo {
+    pub name: String,
+    pub number: String,
+    pub address: String,
+    pub client: String,
+    pub date: String,
+    pub file_name: String,
+    /// Every field of the record the data comes from, in the document's own words.
+    pub fields: Vec<(String, String)>,
+}
+
+/// The paper the document is set up for, and how many pages its drawing area has.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct Page {
+    /// The printable area of one page in metres on paper.
+    pub width: f64,
+    pub height: f64,
+    /// The drawing area in pages across and down.
+    pub columns: u16,
+    pub rows: u16,
 }
 
 /// The plan of a design layer: its 2D line work as seen from above, the plan views of its
