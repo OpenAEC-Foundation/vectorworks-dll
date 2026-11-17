@@ -61,8 +61,6 @@ fn plug_in_category(name: &str) -> &'static str {
     }
 }
 
-/// Most fields of a record whose values are shown with its object.
-const MAX_RECORD_FIELDS: usize = 64;
 /// Colour of lines whose pen is not known.
 const PEN_COLOR: [u8; 3] = [30, 30, 30];
 /// Fill of objects whose colour is not known.
@@ -533,11 +531,9 @@ impl Builder<'_, '_> {
             if let Some(entity) = crate::records::ifc_entity(&record) {
                 map.entry("IFC").or_insert_with(|| entity.into());
             }
+            // (all of them: the record of a plug-in object holds its settings, such as the
+            // name, number and area of a space or the width of a door)
             let record = crate::records::label(&record);
-            // (a record of hundreds of fields is the settings of a plug-in object, not data)
-            if values.len() > MAX_RECORD_FIELDS {
-                continue;
-            }
             for (field, value) in crate::records::pairs(&values) {
                 let value = match value {
                     crate::records::Value::Integer(v) => v.into(),
