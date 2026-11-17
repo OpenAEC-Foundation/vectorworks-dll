@@ -23,6 +23,7 @@ pub mod mesh;
 pub mod palette;
 pub mod raw;
 pub mod records;
+pub mod resources;
 pub mod shapes;
 pub mod tri;
 
@@ -93,6 +94,7 @@ fn document(raw: &Raw, info: Info) -> Document {
         });
     }
     doc.info.objects = doc.objects.len();
+    doc.resources = resources::read(raw);
     doc
 }
 
