@@ -39,10 +39,10 @@ Black-box only (see the clean-room rules in the README):
 | 3D primitives: extrude, 3D polygon, mesh | **done**; multiple extrude, sweep, NURBS open | meshes equal to Vectorworks' STL export for samples 20 to 27, 30 |
 | Symbols: definitions, instances (placement, scale) | **done** | STL export of samples 50, 51 |
 | Groups and nesting | **done** | sample 43 |
-| Solids as Parasolid bodies (walls, CSG solids, slabs, primitives): type 114 section 19, type 85 | found, not read; the wire frame (sections 0 and 13) is understood | — |
+| Solids as Parasolid bodies (walls, CSG solids, sweeps, multiple extrudes, NURBS surfaces): type 114 section 19, read by `vwx-xt` | **done** for planes, cylinders, cones, spheres, tori; faces on B-surfaces, swept, spun, blend and offset surfaces are filled flat; primitives (type 95, 85) open | STL export of samples 34, 35, 60 to 65: same bounds and triangle counts; 67 714 of 67 788 corpus bodies parse |
 | Slabs, roofs, columns, doors, windows, stairs, spaces | not started | — |
 | Records and IFC data attached to objects | not started | — |
-| Viewer meshes (`vwx_read::read`): per layer and class, objects pickable, colours from the palette | **started**: 71 of the 787 corpus files give meshes (library files hold only symbol definitions; walls and solids wait for Parasolid) | STL comparison `tools/compare_stl.py` |
+| Viewer meshes (`vwx_read::read`): per layer and class, objects pickable, colours from the palette; a file with nothing on its layers shows its symbol definitions side by side | **started**: 419 of the 787 corpus files give meshes, 45 M triangles | STL comparison `tools/compare_stl.py`: 23 of 30 samples equal, 7 not drawn yet |
 | C ABI: `vwx_open`, `vwx_open_bytes`, `vwx_query` (info, probe, document, objects), `vwx_free`, `vwx_close` | **done** (answers grow with the reader) | unit tests |
 
 ## Crates
@@ -50,6 +50,7 @@ Black-box only (see the clean-room rules in the README):
 | Crate | Role |
 |---|---|
 | `vwx-core` | Container layer and analysis tools; no knowledge of objects |
+| `vwx-xt` | Parasolid XT neutral binary: nodes, topology, triangulation of faces. Knows nothing of Vectorworks |
 | `vwx-model` | Neutral, serialisable model (`Document`, `Layer`, `Class`, `Object`) and viewer output (`Scene`, `Mesh`); metres, Z up |
 | `vwx-read` | Object readers: container records to `vwx-model`; mesh building |
 | `vwx-ffi` | `vwx.dll` (C ABI, JSON requests) |

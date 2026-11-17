@@ -1,0 +1,281 @@
+//! Points along the curve of an edge.
+//!
+//! An edge runs from its start vertex to its end vertex along its curve; whether that is the
+//! direction of increasing curve parameter follows from the `sense` of the curve nodes (a
+//! trimmed curve is positive, its basis curve says whether its parameter increases). A fin uses
+//! the edge in its own direction or against it.
+//!
+//! Lines need no points between their ends. Circles and ellipses are stepped by angle. B-curves
+//! are evaluated; intersection curves come with their own points (the chart). For the kinds not
+//! evaluated the edge is a straight segment.
+
+use std::f64::consts::TAU;
+
+use crate::geom::{add, dist, mul, sub, Frame, P3};
+use crate::parse::{File, Node, Value};
+
+/// Largest angle between two points on a circle.
+pub const ARC_STEP: f64 = TAU / 32.0;
+/// Points per span of a B-curve of degree 2 or more.
+const SPAN_STEPS: usize = 6;
+
+const LINE: u16 = 30;
+const CIRCLE: u16 = 31;
+const ELLIPSE: u16 = 32;
+const INTERSECTION: u16 = 38;
+const TRIMMED_CURVE: u16 = 133;
+const B_CURVE: u16 = 134;
+
+/// The points of the curve of node `curve` strictly between `from` and `to`, going along the
+/// edge when `forward`. With `from` and `to` `None` (a ring edge, without vertices): the whole
+/// closed curve, as a ring of points.
+pub fn between(file: &File, curve: u32, from: Option<P3>, to: Option<P3>, forward: bool) -> Vec<P3> {
+    // down to the curve that has a shape, collecting the direction
+    let mut increasing = forward;
+    let mut node = file.node(curve);
+    while let Some(n) = node {
+        increasing ^= !n.positive();
+        if n.code() != TRIMMED_CURVE {
+            break;
+        }
+        node = file.node(n.ptr("basis_curve"));
+    }
+    let Some(n) = node else { return Vec::new() };
+    match n.code() {
+        LINE => Vec::new(),
+        CIRCLE | ELLIPSE => conic(n, from, to, increasing).unwrap_or_default(),
+        B_CURVE => {
+            let points = bspline_points(file, n).unwrap_or_default();
+            along(&points, from, to, increasing)
+        }
+        INTERSECTION => {
+            let points: Vec<P3> = file.node(n.ptr("chart")).map(|c| c.many("Hvec").iter().filter_map(vector).collect()).unwrap_or_default();
+            along(&points, from, to, increasing)
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn vector(v: &Value) -> Option<P3> {
+    match v {
+        Value::Vector(p) => Some(*p),
+        _ => None,
+    }
+}
+
+/// Points on a circle or an ellipse `C + a X cos t + b Y sin t`.
+fn conic(n: &Node, from: Option<P3>, to: Option<P3>, increasing: bool) -> Option<Vec<P3>> {
+    let frame = Frame::new(n.vector("centre")?, n.vector("normal")?, n.vector("x_axis")?);
+    let (a, b) = match n.real("radius") {
+        Some(r) => (r, r),
+        None => (n.real("major_radius")?, n.real("minor_radius")?),
+    };
+    if !(a.is_finite() && b.is_finite()) || a == 0.0 || b == 0.0 {
+        return None;
+    }
+    let angle = |p: P3| {
+        let l = frame.local(p);
+        (l[1] / b).atan2(l[0] / a)
+    };
+    let at = |t: f64| frame.world([a * t.cos(), b * t.sin(), 0.0]);
+    let (start, sweep) = match (from, to) {
+        (Some(p), Some(q)) => {
+            let (t0, t1) = (angle(p), angle(q));
+            let mut sweep = if increasing { t1 - t0 } else { t0 - t1 }.rem_euclid(TAU);
+            // the same point at both ends (an edge with one vertex) is the whole curve
+            if sweep < 1e-9 {
+                sweep = TAU;
+            }
+            (t0, sweep)
+        }
+        _ => (0.0, TAU),
+    };
+    let steps = (sweep / ARC_STEP).ceil().max(1.0) as usize;
+    let sign = if increasing { 1.0 } else { -1.0 };
+    let ring = from.is_none();
+    // a ring gives all its points; an arc those strictly between its ends
+    let range = if ring { 0..steps } else { 1..steps };
+    Some(range.map(|k| at(start + sign * sweep * k as f64 / steps as f64)).collect())
+}
+
+/// The part of the polyline `points` strictly between the points nearest to `from` and `to`,
+/// in the order of the polyline when `increasing`. A closed polyline is followed past its end.
+fn along(points: &[P3], from: Option<P3>, to: Option<P3>, increasing: bool) -> Vec<P3> {
+    if points.len() < 2 {
+        return Vec::new();
+    }
+    let closed = dist(points[0], points[points.len() - 1]) < 1e-9 * (1.0 + dist(points[0], points[points.len() / 2]));
+    let (Some(from), Some(to)) = (from, to) else {
+        let mut ring: Vec<P3> = points[..points.len() - usize::from(closed)].to_vec();
+        if !increasing {
+            ring.reverse();
+        }
+        return ring;
+    };
+    let nearest = |p: P3| (0..points.len()).min_by(|&a, &b| dist(points[a], p).total_cmp(&dist(points[b], p))).unwrap_or(0);
+    let (a, b) = (nearest(from), nearest(to));
+    let n = points.len() - usize::from(closed);
+    let mut out = Vec::new();
+    let step = |k: usize| if increasing { (k + 1) % n } else { (k + n - 1) % n };
+    let wraps = closed && (if increasing { b <= a } else { b >= a });
+    if !wraps && (if increasing { b <= a } else { b >= a }) {
+        return out;
+    }
+    let mut k = step(a.min(n - 1));
+    let end = b.min(n - 1);
+    let mut guard = 0;
+    while k != end && guard < n {
+        out.push(points[k]);
+        k = step(k);
+        guard += 1;
+    }
+    // the ends themselves belong to the vertices
+    let tolerance = 1e-9 * (1.0 + dist(from, to));
+    out.retain(|p| dist(*p, from) > tolerance && dist(*p, to) > tolerance);
+    out
+}
+
+/// A B-spline (NURBS) curve as the reference stores it.
+pub struct Nurbs {
+    pub degree: usize,
+    pub dim: usize,
+    /// The control points, `dim` values each; a rational curve has its weight last and the
+    /// coordinates multiplied by it.
+    pub vertices: Vec<f64>,
+    /// The knots with their multiplicities written out.
+    pub knots: Vec<f64>,
+    pub rational: bool,
+}
+
+impl Nurbs {
+    /// The curve of a `NURBS_CURVE` node.
+    pub fn curve(file: &File, nurbs: &Node) -> Option<Nurbs> {
+        let reals = |n: u32, field: &str| -> Option<Vec<f64>> {
+            Some(file.node(n)?.many(field).iter().filter_map(|v| if let Value::Real(r) = v { Some(*r) } else { None }).collect())
+        };
+        let mult: Vec<i64> = file.node(nurbs.ptr("knot_mult"))?.many("mult").iter().filter_map(|v| if let Value::Int(i) = v { Some(*i) } else { None }).collect();
+        let distinct = reals(nurbs.ptr("knots"), "knots")?;
+        let knots = distinct.iter().zip(&mult).flat_map(|(k, m)| std::iter::repeat_n(*k, (*m).max(0) as usize)).collect();
+        Some(Nurbs {
+            degree: nurbs.int("degree")? as usize,
+            dim: nurbs.int("vertex_dim")? as usize,
+            vertices: reals(nurbs.ptr("bspline_vertices"), "vertices")?,
+            knots,
+            rational: nurbs.int("rational") == Some(1),
+        })
+    }
+
+    fn count(&self) -> usize {
+        self.vertices.len() / self.dim.max(1)
+    }
+
+    /// The parameter range in which the curve is defined.
+    pub fn range(&self) -> Option<(f64, f64)> {
+        let n = self.count();
+        (self.dim >= 1 && n > self.degree && self.knots.len() > n + self.degree).then(|| (self.knots[self.degree], self.knots[n]))
+    }
+
+    /// The point at parameter `t` (de Boor), with the weight divided out: `dim` values, or
+    /// `dim - 1` for a rational curve.
+    pub fn eval(&self, t: f64) -> Vec<f64> {
+        let (p, n) = (self.degree, self.count());
+        // the span k with knots[k] <= t < knots[k + 1], kept inside the defined range
+        let mut k = p;
+        while k + 1 < n && self.knots[k + 1] <= t {
+            k += 1;
+        }
+        let mut d: Vec<Vec<f64>> = (0..=p).map(|j| self.vertices[(k - p + j) * self.dim..(k - p + j + 1) * self.dim].to_vec()).collect();
+        for r in 1..=p {
+            for j in (r..=p).rev() {
+                let i = k - p + j;
+                let span = self.knots[i + p + 1 - r] - self.knots[i];
+                let a = if span > 0.0 { (t - self.knots[i]) / span } else { 0.0 };
+                for c in 0..self.dim {
+                    d[j][c] = (1.0 - a) * d[j - 1][c] + a * d[j][c];
+                }
+            }
+        }
+        let mut out = d.swap_remove(p);
+        if self.rational {
+            let w = out.pop().filter(|w| *w != 0.0).unwrap_or(1.0);
+            out.iter_mut().for_each(|c| *c /= w);
+        }
+        out
+    }
+
+    /// Parameters to draw the curve with: the knots of its range and steps between them.
+    pub fn parameters(&self) -> Vec<f64> {
+        let Some((lo, hi)) = self.range() else { return Vec::new() };
+        let steps = if self.degree <= 1 { 1 } else { SPAN_STEPS };
+        let mut breaks: Vec<f64> = self.knots.iter().copied().filter(|k| *k >= lo && *k <= hi).collect();
+        breaks.dedup();
+        let mut out = Vec::new();
+        for w in breaks.windows(2) {
+            out.extend((0..steps).map(|s| w[0] + (w[1] - w[0]) * s as f64 / steps as f64));
+        }
+        out.push(hi);
+        out
+    }
+}
+
+/// The points a `B_CURVE` node is drawn with (3D curves).
+fn bspline_points(file: &File, b_curve: &Node) -> Option<Vec<P3>> {
+    let nurbs = Nurbs::curve(file, file.node(b_curve.ptr("nurbs"))?)?;
+    if nurbs.dim - usize::from(nurbs.rational) != 3 {
+        return None;
+    }
+    Some(nurbs.parameters().into_iter().map(|t| nurbs.eval(t)).map(|p| [p[0], p[1], p[2]]).collect())
+}
+
+/// A point between two others, for callers that step along straight edges.
+pub fn lerp(a: P3, b: P3, t: f64) -> P3 {
+    add(a, mul(sub(b, a), t))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nurbs_quarter_circle_is_on_the_circle() {
+        // the rational quadratic quarter circle from (1, 0) to (0, 1)
+        let w = std::f64::consts::FRAC_1_SQRT_2;
+        let n = Nurbs { degree: 2, dim: 4, vertices: vec![1.0, 0.0, 0.0, 1.0, w, w, 0.0, w, 0.0, 1.0, 0.0, 1.0], knots: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0], rational: true };
+        assert_eq!(n.range(), Some((0.0, 1.0)));
+        for t in n.parameters() {
+            let p = n.eval(t);
+            assert!((p[0].hypot(p[1]) - 1.0).abs() < 1e-12, "{t}: {p:?}");
+        }
+        assert_eq!(n.eval(0.0), [1.0, 0.0, 0.0]);
+        let end = n.eval(1.0);
+        assert!(end[0].abs() < 1e-12 && (end[1] - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn nurbs_polyline_with_inner_knots() {
+        // degree 1 through (0,0), (1,0), (1,1)
+        let n = Nurbs { degree: 1, dim: 2, vertices: vec![0.0, 0.0, 1.0, 0.0, 1.0, 1.0], knots: vec![0.0, 0.0, 1.0, 2.0, 2.0], rational: false };
+        assert_eq!(n.parameters(), [0.0, 1.0, 2.0]);
+        assert_eq!(n.eval(0.5), [0.5, 0.0]);
+        assert_eq!(n.eval(1.5), [1.0, 0.5]);
+        assert_eq!(n.eval(2.0), [1.0, 1.0]);
+    }
+
+    #[test]
+    fn polyline_part_between_two_points_either_way() {
+        let line: Vec<P3> = (0..6).map(|k| [k as f64, 0.0, 0.0]).collect();
+        let (a, b) = (Some([1.0, 0.0, 0.0]), Some([4.0, 0.0, 0.0]));
+        assert_eq!(along(&line, a, b, true), [[2.0, 0.0, 0.0], [3.0, 0.0, 0.0]]);
+        assert_eq!(along(&line, b, a, false), [[3.0, 0.0, 0.0], [2.0, 0.0, 0.0]]);
+        // against the direction of an open curve there is nothing between
+        assert!(along(&line, b, a, true).is_empty());
+    }
+
+    #[test]
+    fn closed_polyline_is_followed_past_its_end() {
+        let square: Vec<P3> = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.0, 0.0]].iter().map(|p| [p[0], p[1], 0.0]).collect();
+        let (a, b) = (Some([0.0, 1.0, 0.0]), Some([1.0, 0.0, 0.0]));
+        assert_eq!(along(&square, a, b, true), [[0.0, 0.0, 0.0]]);
+        assert_eq!(along(&square, None, None, false).len(), 4);
+    }
+}

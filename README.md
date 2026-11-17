@@ -3,9 +3,10 @@
 Native library (DLL) that reads Vectorworks `.vwx` files without Vectorworks, for use by
 [open-3d-viewer](https://github.com/OpenAEC-Foundation/open-3d-viewer) and other tools.
 
-**Status:** private, pre-alpha. The container is read (header, Snappy compressed body, records,
-object types and the object tree: all 787 files of a Vectorworks 2027 installation open);
-object geometry is being decoded. Do not make this repository
+**Status:** private, pre-alpha. All 787 files of a Vectorworks 2027 installation open, 419 of
+them give meshes: extrudes, meshes, 3D polygons, placed symbols and the solids kept as Parasolid
+bodies (walls, CSG solids, sweeps). Open: free-form faces, polylines, text, records, saved
+views, sheets. Do not make this repository
 public without a decision by the maintainers (see "Legal" below).
 
 ## Scope
@@ -22,6 +23,7 @@ public without a decision by the maintainers (see "Legal" below).
 | Crate | Role |
 |---|---|
 | `vwx-core` | Container layer: header, blocks, compressed streams; analysis tools (probe, scan, diff, hex) |
+| `vwx-xt` | Parasolid XT bodies (the solids inside a file): nodes and triangles |
 | `vwx-model` | Neutral, serialisable model and viewer meshes |
 | `vwx-read` | Semantic readers: records of a file to `vwx-model` |
 | `vwx-ffi` | `vwx.dll`: `vwx_open`, `vwx_query` (JSON in/out), `vwx_free`, `vwx_close` |
@@ -41,6 +43,10 @@ and exports.
 - Never consult third-party VWX parsers, SDK headers that describe the file format, or leaked or
   licensed format documentation.
 - Contributors who have seen such material do not write reader code.
+- Public documents that are not about the Vectorworks format are used and named where they are:
+  the Vectorworks scripting reference (object type numbers, the calls the oracle scripts make),
+  Siemens' JT file format reference (Annex E, the Parasolid XT data that solids are kept in),
+  Google's Snappy format description.
 - Vectorworks is used as an oracle: it makes sample files from scripts we write, and exports
   them (IFC, DXF/DWG, 3DS/OBJ) as the reference for what a file contains. Files from the
   oracle are made from our own content only.
@@ -51,7 +57,8 @@ Never commit `.vwx`, `.mcd` or `.sta` files, Vectorworks sample or library conte
 derived from them. Sample files live outside the repository (set `VWX_SAMPLES` to their folder);
 `.gitignore` enforces the file types. The corpus test runs over the files a Vectorworks
 installation ships with, where they are installed. Samples we make ourselves with the oracle
-(`docs/ORACLE.md`) are our own and are kept in the private `vwx-samples` repository.
+(`docs/ORACLE.md`) are kept on the machine that made them, in the `VWX_SAMPLES` folder, and in no
+repository either.
 
 ## Legal
 

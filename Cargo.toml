@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/vwx-core",
     "crates/vwx-model",
+    "crates/vwx-xt",
     "crates/vwx-read",
     "crates/vwx-ffi",
     "crates/vwx-cli",
@@ -22,6 +23,7 @@ serde_json = "1.0"
 vwx-core = { path = "crates/vwx-core" }
 vwx-model = { path = "crates/vwx-model" }
 vwx-read = { path = "crates/vwx-read" }
+vwx-xt = { path = "crates/vwx-xt" }
 
 [profile.release]
 lto = "thin"

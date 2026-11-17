@@ -15,4 +15,5 @@ path = "src/main.rs"
 vwx-core.workspace = true
 vwx-read.workspace = true
 vwx-model.workspace = true
+vwx-xt.workspace = true
 serde_json.workspace = true

@@ -23,7 +23,12 @@ pub mod kind {
     pub const MESH_FACE: u8 = 41;
     pub const NAMES: u8 = 55;
     pub const USER_DATA: u8 = 76;
+    pub const SWEEP: u8 = 34;
+    pub const MULTIPLE_EXTRUDE: u8 = 38;
     pub const CSG_SOLID: u8 = 84;
+    pub const NURBS_SURFACE: u8 = 113;
+    /// The cached solid body of its parent: wire frame and Parasolid data.
+    pub const BODY: u8 = 114;
     pub const CLASS: u8 = 94;
 }
 

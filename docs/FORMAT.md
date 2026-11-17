@@ -189,19 +189,42 @@ Every drawn object starts alike:
 
 ### Solids: type 114 and Parasolid
 
-A type 114 record holds the result of a solid operation and the body of a wall. After 10 bytes
-at 0x50: `u16`, `u32` total size, then 15 slots of (`u16` section number or `0xffff`, `u32`
-offset counted from 0x60).
+A type 114 record is the cached solid body of its parent: of a CSG solid (84), an extrude (24),
+a sweep (34), a multiple extrude (38), a NURBS surface (113). The body of a wall is that of the
+CSG solid among the wall's children. After 10 bytes at 0x50: `u16`, `u32` total size, then 15
+slots of (`u16` section number or `0xffff`, `u32` offset counted from 0x60).
 
-- section 0: points, three `f64` each;
+- section 0: points, three `f64` each, in millimetres;
 - section 13: polylines through them, 6 bytes each (`u16` point count, `u32` first point): the
   edges of the solid (wall of sample 60: 24 points, 12 edges of a box 5000 x 150 x 3000);
-- section 19: a 6-byte head and a **Parasolid** transmit file, binary, starting
-  `PS...: TRANSMIT FILE created by modeller version 3801180` with schema `SCH_3801180_38101_13006`.
-  The solid itself. Parasolid XT is a public format (Siemens publishes the XT Format Reference);
-  reading it is the next layer of the reader.
+- section 19: a 6-byte head and a **Parasolid** transmit file, neutral binary, starting
+  `PS`, 0, 0, `: TRANSMIT FILE created by modeller version 3801180`, schema
+  `SCH_3801180_38101_13006`. The solid itself, read by the `vwx-xt` crate.
 
-Solids made as primitives (type 95: sphere, cone, hemisphere) have a type 85 child instead.
+**Unit.** One unit of the Parasolid data is 10 000 mm (sample 60: the wall of 5000 mm is 0.5).
+
+**Coordinates.** The body of an extrude and of a sweep is in the object's own coordinates (its
+placement at 0xcc applies); the body of a CSG solid and of a multiple extrude is in the
+coordinates the object is placed in (their placement is already in it). The reader tells them
+apart per object: a body that fills the object's own box at 0x9c is in the object's coordinates.
+Found on the corpus (`Residential New Construction.sta`), checked on samples 34, 35, 60 to 65
+against Vectorworks' STL export: same bounds and the same number of triangles.
+
+**Parasolid XT.** A public format: Annex E ("XT B-Rep data segment") of Siemens' "JT File Format
+Reference Version 10.0". Big-endian; a header, then nodes (type, index, fields), each a piece of
+topology (body, shell, face, loop, fin, edge, vertex) or geometry (plane, cylinder, B-surface,
+line, circle, B-curve, ...). The field layout of each node type is the base schema 13006 with an
+edit sequence the file gives at the first node of the type; the reference prints later structs
+for `LIST` and `POINTER_LIS_BLOCK`, whose 13006 layouts were found from those edit sequences
+(`tools/gen_xt_schema.py`). The corpus holds 67 788 bodies in 281 files, written by 65 versions
+of the modeller (schemas 19008 to 38101); 67 714 parse.
+
+Faces by surface in the corpus, of 641 490: plane 84 %, cylinder 7 %, B-surface 3 %, swept 1 %,
+sphere, torus, blend, cone, offset and spun under 1 % each. Planes, cylinders, cones, spheres and
+tori are triangulated; faces on the others are filled flat between their edges for now.
+
+Solids made as primitives (type 95: sphere, cone, hemisphere) have a type 85 child instead: a
+cached mesh of their own, not decoded.
 
 ### Not decoded yet
 

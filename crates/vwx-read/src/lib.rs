@@ -13,9 +13,9 @@
 //! Everything works on bytes, so the reader also runs in the browser.
 //!
 //! **Status:** every object of a file is listed with its type, name, layer, class and parent
-//! ([`open`]); [`read`] draws extrudes, 3D polygons, flat 2D shapes and placed symbols. Solids
-//! kept as Parasolid bodies (walls, CSG solids, spheres), meshes, sweeps and NURBS are not drawn
-//! yet. See `docs/ARCHITECTURE.md`.
+//! ([`open`]); [`read`] draws extrudes, 3D polygons, meshes, flat 2D shapes, placed symbols and
+//! the solids kept as Parasolid bodies (walls, CSG solids, sweeps, multiple extrudes, NURBS
+//! surfaces). See `docs/ARCHITECTURE.md` for what is open.
 
 pub mod dmdt;
 pub mod kinds;

@@ -9,6 +9,8 @@ const USAGE: &str = "usage:
   vwx read <file.vwx>                       read the file; meshes and triangles per mesh
   vwx document <file.vwx>                   the neutral model as JSON
   vwx mesh <file.vwx> [--obj out.obj]       bounds and triangles of the meshes; writes an OBJ
+  vwx xt <file> [--errors] [--obj out.obj]  the Parasolid bodies in a file: node types, failures,
+                                            faces and triangles (in the units of the bodies)
 analysis:
   vwx probe <file> [--pretty]               container, compressed streams, strings, entropy (JSON)
   vwx survey <dir>                          one line per file: size, head bytes, streams
@@ -193,6 +195,67 @@ fn run(args: &[String]) -> Result<Option<Value>, String> {
                 std::fs::write(out, obj).map_err(|e| format!("{out}: {e}"))?;
             }
             Ok(Some(json!({"meshes": scene.meshes.len(), "triangles": triangles, "min": if triangles > 0 { json!(lo) } else { Value::Null }, "max": if triangles > 0 { json!(hi) } else { Value::Null }})))
+        }
+        "xt" => {
+            // the Parasolid bodies of a file (or of raw XT data): node counts, and what fails
+            let path = file()?;
+            let data = read(path)?;
+            let body = match vwx_core::container::unpack(&data) {
+                Ok(u) => u.body,
+                Err(_) => data,
+            };
+            let starts = vwx_xt::find(&body);
+            let mut kinds = std::collections::BTreeMap::<String, usize>::new();
+            let mut errors = std::collections::BTreeMap::<String, usize>::new();
+            let mut schemas = std::collections::BTreeMap::<String, usize>::new();
+            let (mut ok, mut nodes) = (0usize, 0usize);
+            let (mut faces, mut approximate, mut skipped, mut triangles) = (0usize, 0usize, 0usize, 0usize);
+            let (mut lo, mut hi) = ([f64::MAX; 3], [f64::MIN; 3]);
+            let mut obj = String::new();
+            let mut obj_base = 1u32;
+            for (k, &at) in starts.iter().enumerate() {
+                let end = starts.get(k + 1).copied().unwrap_or(body.len());
+                match vwx_xt::parse(&body[at..end]) {
+                    Ok(f) => {
+                        ok += 1;
+                        nodes += f.nodes.len();
+                        *schemas.entry(f.schema.clone()).or_default() += 1;
+                        for n in f.nodes.values() {
+                            *kinds.entry(n.def.name.clone()).or_default() += 1;
+                        }
+                        let mesh = vwx_xt::tessellate(&f);
+                        faces += mesh.faces;
+                        approximate += mesh.approximate;
+                        skipped += mesh.skipped;
+                        triangles += mesh.triangles.len();
+                        for p in &mesh.positions {
+                            for a in 0..3 {
+                                lo[a] = lo[a].min(p[a]);
+                                hi[a] = hi[a].max(p[a]);
+                            }
+                            obj.push_str(&format!("v {} {} {}\n", p[0], p[1], p[2]));
+                        }
+                        for t in &mesh.triangles {
+                            obj.push_str(&format!("f {} {} {}\n", obj_base + t[0], obj_base + t[1], obj_base + t[2]));
+                        }
+                        obj_base += mesh.positions.len() as u32;
+                    }
+                    Err(e) => {
+                        if flag(args, "--errors") {
+                            eprintln!("{path}: body {k} at {at:#x}: {e}");
+                        }
+                        *errors.entry(e.what).or_default() += 1;
+                    }
+                }
+            }
+            if let Some(out) = opt(args, "--obj") {
+                std::fs::write(out, obj).map_err(|e| format!("{out}: {e}"))?;
+            }
+            let bounds = if triangles > 0 { json!([lo, hi]) } else { Value::Null };
+            Ok(Some(json!({
+                "bodies": starts.len(), "parsed": ok, "nodes": nodes, "schemas": schemas, "types": kinds, "errors": errors,
+                "faces": faces, "approximate_faces": approximate, "skipped_faces": skipped, "triangles": triangles, "bounds": bounds,
+            })))
         }
         "probe" => to(serde_json::to_value(Probe::of(&read(file()?)?))),
         "survey" => survey(Path::new(file()?)).map(|_| None),

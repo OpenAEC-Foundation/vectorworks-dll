@@ -32,6 +32,11 @@ impl Affine {
         std::array::from_fn(|k| p[0] * self.rows[0][k] + p[1] * self.rows[1][k] + p[2] * self.rows[2][k])
     }
 
+    /// The direction `d` placed (without the offset).
+    pub fn direction(&self, d: P3) -> P3 {
+        self.linear(d)
+    }
+
     pub fn apply(&self, p: P3) -> P3 {
         let q = self.linear(p);
         [q[0] + self.offset[0], q[1] + self.offset[1], q[2] + self.offset[2]]
@@ -161,6 +166,29 @@ pub fn instance(r: &Record) -> Option<Instance> {
 pub fn polygon_3d(r: &Record) -> Option<Vec<P3>> {
     let count = le::u16(r.bytes, 0xd0)? as usize;
     (0..count).map(|k| xyz(r, 0xd2 + 24 * k)).collect()
+}
+
+/// The placement of a 3D object that has one at 0xcc (extrude, sweep, multiple extrude, CSG
+/// solid), and its box in its own coordinates at 0x9c (largest then smallest x, y, z).
+pub fn solid_frame(r: &Record) -> Option<(Affine, [P3; 2])> {
+    Some((placement(r, 0xcc)?, [xyz(r, 0x9c + 24)?, xyz(r, 0x9c)?]))
+}
+
+/// Millimetres per unit of the Parasolid bodies in a file (sample 60: a wall of 5000 mm is 0.5).
+pub const BODY_UNIT: f64 = 10_000.0;
+
+/// The solid in a type 114 record: the triangles of its Parasolid body, in millimetres.
+pub fn body(r: &Record) -> Option<vwx_xt::Mesh> {
+    let at = *vwx_xt::find(r.bytes).first()?;
+    let file = vwx_xt::parse(&r.bytes[at..]).ok()?;
+    let mut mesh = vwx_xt::tessellate(&file);
+    if mesh.triangles.is_empty() {
+        return None;
+    }
+    for p in &mut mesh.positions {
+        *p = p.map(|c| c * BODY_UNIT);
+    }
+    Some(mesh)
 }
 
 /// The points of a mesh (type 40): `u32` count at 0xd0, then 28 bytes each from 0xd4 (x, y, z

@@ -4,11 +4,17 @@
 //!
 //! - extrudes of rectangles, ovals, circles and polygons;
 //! - 3D polygons and meshes;
+//! - CSG solids, walls, sweeps, multiple extrudes and NURBS surfaces from the Parasolid body the
+//!   file keeps for them (`vwx-xt`); faces on surfaces that are not evaluated yet (B-surfaces,
+//!   blends) are filled flat;
 //! - rectangles, ovals, circles and polygons drawn on a layer itself, as flat faces at the
 //!   layer's elevation;
 //! - placed symbols (the content of their definition), groups, and whatever of the above sits
 //!   inside other objects. Inside a symbol or another object 2D shapes are its plan view and are
 //!   left out.
+//!
+//! A document with nothing drawn on its layers (a symbol library) shows its symbol definitions
+//! side by side instead, each pickable under its name.
 //!
 //! Output: metres, Z up.
 
@@ -50,9 +56,20 @@ pub fn scene(raw: &Raw, info: Info) -> Scene {
             }
         }
     }
+    // a library file places nothing on its layers: its symbols are what there is to see
+    if builder.batches.values().all(|b| b.mesh.indices.is_empty()) {
+        builder.library();
+    }
     let meshes = builder.batches.into_values().map(|b| b.mesh).filter(|m| !m.indices.is_empty()).collect();
     Scene { info, meshes }
 }
+
+/// A symbol definition drawn for the library view: its record, its first index and first vertex
+/// in the mesh, and its lowest and highest corner in metres.
+type Shown = (usize, usize, usize, [f32; 3], [f32; 3]);
+
+/// The batch that holds the symbol definitions of a library file.
+const LIBRARY: (usize, u32) = (usize::MAX, 0);
 
 struct Batch {
     mesh: Mesh,
@@ -70,13 +87,89 @@ impl Builder<'_, '_> {
     fn batch(&mut self, key: (usize, u32)) -> &mut Batch {
         let raw = self.raw;
         self.batches.entry(key).or_insert_with(|| {
-            let layer = raw::layer_name(raw.records[key.0].bytes).unwrap_or_else(|| "Layer".into());
+            let layer = match key {
+                LIBRARY => "Symbols".into(),
+                _ => raw::layer_name(raw.records[key.0].bytes).unwrap_or_else(|| "Layer".into()),
+            };
             let name = match raw.names.get(&key.1) {
                 Some(class) => format!("{layer} / {class}"),
                 None => layer,
             };
             Batch { mesh: Mesh { name, color: DEFAULT_COLOR.map(|c| c as f32 / 255.0), colors: Some(Vec::new()), ..Mesh::default() } }
         })
+    }
+
+    /// Draws every symbol definition of the document, side by side in rows, each pickable under
+    /// its name. A definition with nothing in 3D shows its plan view.
+    fn library(&mut self) {
+        let raw = self.raw;
+        self.elevation = 0.0;
+        let mut items: Vec<Shown> = Vec::new();
+        for d in (0..raw.records.len()).filter(|&i| raw.records[i].kind() == kind::SYMBOL_DEFINITION) {
+            let (index, vertex) = {
+                let mesh = &self.batch(LIBRARY).mesh;
+                (mesh.indices.len(), mesh.positions.len() / 3)
+            };
+            for nested in [true, false] {
+                for &c in &raw.children[d] {
+                    self.walk(c, &Affine::IDENTITY, nested, LIBRARY, 1);
+                }
+                if self.batch(LIBRARY).mesh.indices.len() > index {
+                    break;
+                }
+            }
+            let mesh = &self.batch(LIBRARY).mesh;
+            if mesh.indices.len() == index {
+                continue;
+            }
+            let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+            for p in mesh.positions[vertex * 3..].as_chunks::<3>().0 {
+                for k in 0..3 {
+                    lo[k] = lo[k].min(p[k]);
+                    hi[k] = hi[k].max(p[k]);
+                }
+            }
+            items.push((d, index, vertex, lo, hi));
+        }
+        if items.is_empty() {
+            return;
+        }
+        // rows of about equal length and depth, a gap of a tenth of the average size between
+        let size = |lo: &[f32; 3], hi: &[f32; 3], k: usize| (hi[k] - lo[k]).max(0.0);
+        let mean = items.iter().map(|(_, _, _, lo, hi)| size(lo, hi, 0).max(size(lo, hi, 1))).sum::<f32>() / items.len() as f32;
+        let gap = (mean * 0.1).max(0.05);
+        let area: f32 = items.iter().map(|(_, _, _, lo, hi)| (size(lo, hi, 0) + gap) * (size(lo, hi, 1) + gap)).sum();
+        let widest = items.iter().map(|(_, _, _, lo, hi)| size(lo, hi, 0)).fold(0.0, f32::max);
+        let row_length = (area.sqrt() * 1.3).max(widest);
+        let (mut x, mut y, mut depth) = (0.0f32, 0.0f32, 0.0f32);
+        let ends: Vec<usize> = items.iter().skip(1).map(|item| item.2).collect();
+        let mesh = &mut self.batch(LIBRARY).mesh;
+        let last = mesh.positions.len() / 3;
+        for (n, (d, index, vertex, lo, hi)) in items.iter().enumerate() {
+            let (w, deep) = (size(lo, hi, 0), size(lo, hi, 1));
+            if x > 0.0 && x + w > row_length {
+                x = 0.0;
+                y -= depth + gap;
+                depth = 0.0;
+            }
+            // the symbol keeps its height; its lowest corner in plan goes to (x, y - depth)
+            let shift = [x - lo[0], y - hi[1]];
+            let end = ends.get(n).copied().unwrap_or(last);
+            for p in mesh.positions[vertex * 3..end * 3].as_chunks_mut::<3>().0 {
+                p[0] += shift[0];
+                p[1] += shift[1];
+            }
+            x += w + gap;
+            depth = depth.max(deep);
+            let count = ends.get(n).map_or(mesh.indices.len(), |_| items[n + 1].1) - index;
+            let mut map = serde_json::Map::new();
+            if let Some(name) = raw.name(*d) {
+                map.insert("Name".into(), name.into());
+            }
+            map.insert("category".into(), crate::kinds::name(kind::SYMBOL_DEFINITION).into());
+            mesh.elements.push((*d as u64, *index as u32, count as u32));
+            mesh.props.push((*d as u64, serde_json::Value::Object(map).to_string()));
+        }
     }
 
     /// The properties of an object as a flat JSON object.
@@ -109,9 +202,15 @@ impl Builder<'_, '_> {
         let color = shapes::fill_index(r).and_then(|k| raw.palette.color(k)).unwrap_or(DEFAULT_COLOR);
         match r.kind() {
             kind::END | kind::USER_DATA => {}
-            // the children of a CSG solid are its operands; the result is a Parasolid body
-            kind::CSG_SOLID => {}
+            // the children of a CSG solid are its operands; the result is its Parasolid body
+            kind::CSG_SOLID | kind::SWEEP | kind::MULTIPLE_EXTRUDE | kind::NURBS_SURFACE => {
+                self.body(i, place, key, color, true);
+            }
             kind::EXTRUDE => {
+                // the exact body when the file has one and all of it is read
+                if self.body(i, place, key, color, false) {
+                    return;
+                }
                 let Some(e) = shapes::extrude(r) else { return };
                 let place = e.placement.then(place);
                 for &c in &raw.children[i] {
@@ -173,6 +272,51 @@ impl Builder<'_, '_> {
                 }
             }
         }
+    }
+
+    /// Draws the cached solid body of object `i` (its child of type 114). With `approximate`
+    /// false a body with faces that are not evaluated yet is left out. True when drawn.
+    fn body(&mut self, i: usize, place: &Affine, key: (usize, u32), color: [u8; 3], approximate: bool) -> bool {
+        let raw = self.raw;
+        let Some(&child) = raw.children[i].iter().find(|&&c| raw.records[c].kind() == kind::BODY) else { return false };
+        let Some(body) = shapes::body(&raw.records[child]) else { return false };
+        if !approximate && body.approximate > 0 {
+            return false;
+        }
+        // the body is in the coordinates of the object when it fills the object's own box, else
+        // in those the object is placed in
+        let own = shapes::solid_frame(&raw.records[i]).filter(|(_, bounds)| {
+            let (mut lo, mut hi) = ([f64::MAX; 3], [f64::MIN; 3]);
+            for p in &body.positions {
+                for k in 0..3 {
+                    lo[k] = lo[k].min(p[k]);
+                    hi[k] = hi[k].max(p[k]);
+                }
+            }
+            let size = (0..3).map(|k| hi[k] - lo[k]).fold(1.0, f64::max);
+            (0..3).all(|k| (lo[k] - bounds[0][k]).abs() < 1e-3 * size && (hi[k] - bounds[1][k]).abs() < 1e-3 * size)
+        });
+        let place = match own {
+            Some((placement, _)) => placement.then(place),
+            None => *place,
+        };
+        let flip = place.mirrors();
+        let mesh = &mut self.batch(key).mesh;
+        let base = (mesh.positions.len() / 3) as u32;
+        for (p, n) in body.positions.iter().zip(&body.normals) {
+            mesh.positions.extend(place.apply(*p).map(|c| (c * SCALE) as f32));
+            let n = place.direction(*n);
+            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-12) * if flip { -1.0 } else { 1.0 };
+            mesh.normals.extend(n.map(|c| (c / len) as f32));
+        }
+        if let Some(colors) = mesh.colors.as_mut() {
+            colors.extend(std::iter::repeat_n([color[0], color[1], color[2], 255], body.positions.len()));
+        }
+        for t in &body.triangles {
+            let t = if flip { [t[0], t[2], t[1]] } else { *t };
+            mesh.indices.extend(t.map(|k| base + k));
+        }
+        true
     }
 
     /// The prism of a closed outline in the local xy plane between two heights.
@@ -349,6 +493,32 @@ mod tests {
         assert_eq!(m.indices.len() / 3, 12);
         assert_eq!(bounds(m), ([2.5, 1.0, 0.0], [3.0, 2.0, 3.0]));
         assert!(m.props[0].1.contains(r#""Symbol":"Blok""#), "{}", m.props[0].1);
+    }
+
+    #[test]
+    fn a_library_file_shows_its_symbols_side_by_side() {
+        // two definitions holding the same box, nothing on the layer
+        let mut records = vec![tagged(names(&[(30, "Blok"), (31, "Kast")]), 1, 0, 0)];
+        for (reference, address) in [(30, 9), (31, 12)] {
+            records.push(tagged(record(kind::SYMBOL_DEFINITION, 372, &[]), 1, reference, 0));
+            records.extend(box_records(address, address + 1));
+            records.push(tagged(record(kind::END, 88, &[]), address, 0, 0));
+        }
+        records.push(tagged(layer("Ontwerplaag-1", 0.0), 1, 1, 0));
+        let u = unpacked(records);
+        let raw = Raw::new(&u).unwrap();
+        let scene = scene(&raw, Info::default());
+        assert_eq!(scene.meshes.len(), 1);
+        let m = &scene.meshes[0];
+        assert_eq!(m.name, "Symbols");
+        assert_eq!(m.indices.len() / 3, 24);
+        assert_eq!(m.elements.iter().map(|e| (e.1, e.2)).collect::<Vec<_>>(), [(0, 36), (36, 36)]);
+        assert!(m.props[0].1.contains(r#""Name":"Blok""#) && m.props[1].1.contains(r#""Name":"Kast""#), "{:?}", m.props);
+        // boxes of 1 x 0.5 m: two rows (rows are about as long as they are deep together), the
+        // second a gap of 0.1 m behind the first, each at its own height
+        let (lo, hi) = bounds(m);
+        assert_eq!((lo[0], hi[0], hi[1], lo[2], hi[2]), (0.0, 1.0, 0.0, 0.0, 3.0));
+        assert!((lo[1] + 1.1).abs() < 1e-6, "{lo:?}");
     }
 
     #[test]
