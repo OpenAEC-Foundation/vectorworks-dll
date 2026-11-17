@@ -118,14 +118,20 @@ fn conic(n: &Node, from: Option<P3>, to: Option<P3>, increasing: bool) -> Option
     Some(range.map(|k| at(start + sign * sweep * k as f64 / steps as f64)).collect())
 }
 
-/// The part of the polyline `points` strictly between the points nearest to `from` and `to`.
-/// A closed polyline is followed in its own order when `increasing`, else against it, past its
-/// end; on an open one there is only one way from the one point to the other.
+/// The part of the polyline `points` strictly between `from` and `to`. A closed polyline is
+/// followed in its own order when `increasing`, else against it, past its end; on an open one
+/// there is only one way from the one point to the other.
+///
+/// The ends are placed on the polyline where it passes nearest to them, between its points:
+/// an edge shorter than the step between the points of its curve must not be taken for the
+/// curve all the way round (as it would be if its ends were matched to the nearest points,
+/// which can come in the wrong order).
 fn along(points: &[P3], from: Option<P3>, to: Option<P3>, increasing: bool) -> Vec<P3> {
     if points.len() < 2 {
         return Vec::new();
     }
-    let closed = dist(points[0], points[points.len() - 1]) < 1e-9 * (1.0 + dist(points[0], points[points.len() / 2]));
+    let size = points.iter().map(|p| dist(*p, points[0])).fold(0.0, f64::max);
+    let closed = dist(points[0], points[points.len() - 1]) < 1e-9 * (1.0 + size);
     let (Some(from), Some(to)) = (from, to) else {
         let mut ring: Vec<P3> = points[..points.len() - usize::from(closed)].to_vec();
         if !increasing {
@@ -133,33 +139,47 @@ fn along(points: &[P3], from: Option<P3>, to: Option<P3>, increasing: bool) -> V
         }
         return ring;
     };
-    let nearest = |p: P3| (0..points.len()).min_by(|&a, &b| dist(points[a], p).total_cmp(&dist(points[b], p))).unwrap_or(0);
-    let (a, b) = (nearest(from), nearest(to));
-    let n = points.len() - usize::from(closed);
+    let (a, b) = (place(points, from), place(points, to));
+    // the points strictly between, by their place along the polyline
     let mut out = Vec::new();
-    if a == b && !closed {
-        return out;
-    }
-    let increasing = if closed { increasing } else { a < b };
-    let step = |k: usize| {
-        if increasing {
-            (k + 1) % n
+    if closed {
+        let n = points.len() - 1;
+        let length = n as f64;
+        let ahead = |from: f64, to: f64| if increasing { to - from } else { from - to }.rem_euclid(length);
+        // an edge with one vertex goes all the way round
+        let span = if dist(from, to) <= 1e-12 * (1.0 + size) { length } else { ahead(a, b) };
+        let mut inside: Vec<(f64, usize)> = (0..n).map(|k| (ahead(a, k as f64), k)).filter(|(d, _)| *d > 0.0 && *d < span).collect();
+        inside.sort_by(|x, y| x.0.total_cmp(&y.0));
+        out.extend(inside.iter().map(|(_, k)| points[*k]));
+    } else {
+        let inside = (0..points.len()).filter(|&k| (k as f64) > a.min(b) && (k as f64) < a.max(b));
+        if a < b {
+            out.extend(inside.map(|k| points[k]));
         } else {
-            (k + n - 1) % n
+            out.extend(inside.rev().map(|k| points[k]));
         }
-    };
-    let mut k = step(a.min(n - 1));
-    let end = b.min(n - 1);
-    let mut guard = 0;
-    while k != end && guard < n {
-        out.push(points[k]);
-        k = step(k);
-        guard += 1;
     }
     // the ends themselves belong to the vertices
     let tolerance = 1e-9 * (1.0 + dist(from, to));
     out.retain(|p| dist(*p, from) > tolerance && dist(*p, to) > tolerance);
     out
+}
+
+/// Where the polyline `points` passes nearest to `p`: `k + t` on the piece from point `k` to
+/// point `k + 1`.
+fn place(points: &[P3], p: P3) -> f64 {
+    let mut best = (f64::MAX, 0.0);
+    for k in 0..points.len() - 1 {
+        let (a, b) = (points[k], points[k + 1]);
+        let d = sub(b, a);
+        let l = crate::geom::dot(d, d);
+        let t = if l > 0.0 { (crate::geom::dot(sub(p, a), d) / l).clamp(0.0, 1.0) } else { 0.0 };
+        let miss = dist(add(a, mul(d, t)), p);
+        if miss < best.0 {
+            best = (miss, k as f64 + t);
+        }
+    }
+    best.1
 }
 
 /// A curve by its parameter, as the surfaces made from a curve use it: a swept surface its
@@ -443,5 +463,14 @@ mod tests {
         let (a, b) = (Some([0.0, 1.0, 0.0]), Some([1.0, 0.0, 0.0]));
         assert_eq!(along(&square, a, b, true), [[0.0, 0.0, 0.0]]);
         assert_eq!(along(&square, None, None, false).len(), 4);
+        // an edge between two points on one piece of the polyline has no points between
+        let (c, d) = (Some([0.2, 0.0, 0.0]), Some([0.4, 0.0, 0.0]));
+        assert!(along(&square, c, d, true).is_empty());
+        assert_eq!(along(&square, d, c, true).len(), 4);
+        // nor when its end is nearer to the next point than its start
+        let (e, f) = (Some([0.45, 0.0, 0.0]), Some([0.55, 0.0, 0.0]));
+        assert!(along(&square, e, f, true).is_empty());
+        // and an edge with one vertex is the whole curve
+        assert_eq!(along(&square, c, c, false).len(), 4);
     }
 }

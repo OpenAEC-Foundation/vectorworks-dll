@@ -292,6 +292,12 @@ fn run(args: &[String]) -> Result<Option<Value>, String> {
                             *kinds.entry(n.def.name.clone()).or_default() += 1;
                         }
                         let mesh = vwx_xt::tessellate(&f);
+                        if flag(args, "--errors") {
+                            for (face, why) in &mesh.failures {
+                                let surface = f.node(*face).and_then(|n| f.node(n.ptr("surface"))).map_or(0, vwx_xt::Node::code);
+                                eprintln!("{path}: body {k} at {at:#x}: face {face} on {}: {why}", vwx_xt::schema::base(surface).map_or("none", |b| b.0));
+                            }
+                        }
                         faces += mesh.faces;
                         approximate += mesh.approximate;
                         skipped += mesh.skipped;

@@ -53,12 +53,14 @@ pub struct Mesh {
     pub approximate_surfaces: Vec<(u16, &'static str)>,
     /// Per face: its first triangle and the node type of its surface (0: none).
     pub face_starts: Vec<(usize, u16)>,
+    /// The faces counted in `approximate` or `skipped`: the index of the face node and why.
+    pub failures: Vec<(u32, &'static str)>,
 }
 
 /// The triangles of every face in `file`.
 pub fn tessellate(file: &File) -> Mesh {
     let mut mesh = Mesh::default();
-    for (_, face) in file.of_type(code::FACE) {
+    for (index, face) in file.of_type(code::FACE) {
         mesh.faces += 1;
         let before = mesh.triangles.len();
         mesh.face_starts.push((before, file.node(face.ptr("surface")).map_or(0, Node::code)));
@@ -71,14 +73,17 @@ pub fn tessellate(file: &File) -> Mesh {
             Some(s) => {
                 if let Err(why) = curved(&mut mesh, &loops, &s, face_sign(face, &s)) {
                     approximate(&mut mesh, file, face, &loops, why);
+                    mesh.failures.push((index, why));
                 }
             }
             None => {
                 approximate(&mut mesh, file, face, &loops, "the surface is not evaluated");
+                mesh.failures.push((index, "the surface is not evaluated"));
             }
         }
         if mesh.triangles.len() == before {
             mesh.skipped += 1;
+            mesh.failures.push((index, "no triangles"));
         }
     }
     mesh
@@ -119,6 +124,69 @@ pub fn trimmed(surface: &std::rc::Rc<crate::nurbs::NurbsSurface>, loops: &[Vec<P
     }
     mesh.faces = 1;
     mesh
+}
+
+/// A description of face node `face` for finding out why it is not triangulated exactly: its
+/// surface, and per loop its fins and its points in the parameters of the surface (all of them
+/// with `points`).
+#[doc(hidden)]
+pub fn explain(file: &File, face: u32, points: bool) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    let Some(f) = file.node(face) else { return out };
+    let surface = file.node(f.ptr("surface"));
+    let _ = writeln!(out, "face {face} sense {} surface {} {:?}", if f.positive() { '+' } else { '-' }, f.ptr("surface"), surface.map(|n| (n.def.name.clone(), n.values.clone())));
+    let s = Surface::load(file, f.ptr("surface"));
+    if let Some(s) = &s {
+        let _ = writeln!(out, "  kind {:?} positive {} offset {} sign {} period {:?} {:?}", s.kind, s.positive, s.offset, face_sign(f, s), s.period_u(), s.period_v());
+    }
+    let mut l = f.ptr("loop");
+    let mut straight = Vec::new();
+    while let Some(lp) = file.node(l) {
+        let _ = writeln!(out, " loop {l}");
+        let first = lp.ptr("fin");
+        let mut fi = first;
+        for _ in 0..10_000 {
+            let Some(fin) = file.node(fi) else { break };
+            let edge = file.node(fin.ptr("edge"));
+            let curve = edge.map_or(0, |e| e.ptr("curve"));
+            let curve = if curve == 0 { fin.ptr("curve") } else { curve };
+            let (shape, _) = curve::shape(file, curve);
+            let other = file.node(fin.ptr("other")).and_then(|o| file.node(o.ptr("loop"))).map_or(0, |lp| lp.ptr("face"));
+            let _ = writeln!(
+                out,
+                "  fin {fi} sense {} edge {} curve {curve} ({}) vertex {} {:?} other face {other}",
+                if fin.positive() { '+' } else { '-' },
+                fin.ptr("edge"),
+                crate::schema::base(shape).map_or("none", |b| b.0),
+                fin.ptr("vertex"),
+                vertex_point(file, fin.ptr("vertex")),
+            );
+            fi = fin.ptr("forward");
+            if fi == first || fi == 0 {
+                break;
+            }
+        }
+        if let (Some(s), Some(ring)) = (&s, loop_points(file, lp, &mut straight).and_then(clean)) {
+            let (uv, tu, tv) = unwrap(s, &ring);
+            let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+            for p in &uv {
+                for k in 0..2 {
+                    lo[k] = lo[k].min(p[k]);
+                    hi[k] = hi[k].max(p[k]);
+                }
+            }
+            let _ = writeln!(out, "  {} points, turns {tu} {tv}, u {:.6}..{:.6} v {:.6}..{:.6}, area {:.6}", ring.len(), lo[0], hi[0], lo[1], hi[1], area2(&uv) / 2.0);
+            if points {
+                for (p, q) in ring.iter().zip(&uv) {
+                    let miss = crate::geom::dist(s.eval(q[0], q[1]), *p);
+                    let _ = writeln!(out, "    {:.6} {:.6} {:.6}  uv {:.6} {:.6}  miss {:.2e}", p[0], p[1], p[2], q[0], q[1], miss);
+                }
+            }
+        }
+        l = lp.ptr("next");
+    }
+    out
 }
 
 /// Fills a face flat between its loops, for a surface that is not evaluated.
@@ -172,9 +240,13 @@ fn loop_points(file: &File, lp: &Node, straight: &mut Vec<u16>) -> Option<Vec<P3
         let fin = file.node(f)?;
         // a loop that is one vertex has a fin without an edge
         let edge = file.node(fin.ptr("edge"))?;
-        let curve = match edge.ptr("curve") {
-            0 => fin.ptr("curve"),
-            c => c,
+        // the curve of the edge runs along the edge, which the fin follows or not. A tolerant
+        // edge has none: each of its fins has a curve of its own (a trimmed SP-curve in the
+        // surface of its face), and that runs along the fin, whatever the fin's sense (the
+        // ends of every such curve of three corpus files: 12 691 along the fin, none against)
+        let (curve, forward) = match edge.ptr("curve") {
+            0 => (fin.ptr("curve"), true),
+            c => (c, fin.positive()),
         };
         let (shape, followed) = curve::shape(file, curve);
         if !followed {
@@ -184,11 +256,11 @@ fn loop_points(file: &File, lp: &Node, straight: &mut Vec<u16>) -> Option<Vec<P3
         let start = file.node(fin.ptr("backward")).and_then(|b| vertex_point(file, b.ptr("vertex")));
         match end {
             Some(end) => {
-                ring.extend(curve::between(file, curve, start.or(Some(end)), Some(end), fin.positive()));
+                ring.extend(curve::between(file, curve, start.or(Some(end)), Some(end), forward));
                 ring.push(end);
             }
             // a ring edge: the whole closed curve
-            None => ring.extend(curve::between(file, curve, None, None, fin.positive())),
+            None => ring.extend(curve::between(file, curve, None, None, forward)),
         }
         f = fin.ptr("forward");
         if f == first || f == 0 {
