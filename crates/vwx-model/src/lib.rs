@@ -124,6 +124,102 @@ pub struct Scene {
     pub texts: Vec<Text>,
     /// The sheet layers: the drawing sheets of the document.
     pub sheets: Vec<Sheet>,
+    /// The worksheets (spreadsheets) of the document, with where they are placed on drawings.
+    #[serde(default)]
+    pub worksheets: Vec<Worksheet>,
+}
+
+/// A worksheet: a spreadsheet of the document. Rows and columns count from 1, as in the
+/// scripting interface; row 0 and column 0 do not hold cells here.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Worksheet {
+    pub id: u64,
+    pub name: String,
+    pub rows: u32,
+    pub columns: u32,
+    /// The cells that hold something (text, a number or a formula), by row then column.
+    pub cells: Vec<Cell>,
+    /// Where drawings show it as an image.
+    #[serde(default)]
+    pub placements: Vec<WorksheetPlacement>,
+    /// Width of each column in pixels (72 per inch), column 1 first.
+    #[serde(default)]
+    pub column_widths: Vec<u32>,
+    /// Height of each row in pixels, row 1 first.
+    #[serde(default)]
+    pub row_heights: Vec<u32>,
+    /// The window of the worksheet on screen: top, left, bottom, right in pixels (zeros: never
+    /// shown).
+    #[serde(default)]
+    pub window: [u32; 4],
+    /// The rows that list objects by a criteria (database rows) with the rows they computed.
+    #[serde(default)]
+    pub database_rows: Vec<DatabaseRow>,
+}
+
+/// A worksheet cell.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Cell {
+    pub row: u32,
+    pub column: u32,
+    /// What the cell shows: its text, or its value as text.
+    pub text: String,
+    /// The formula of the cell with its leading `=`, as `=A1+B1`; `None` when the cell
+    /// holds plain text or a number, or a formula the reader cannot write out.
+    pub formula: Option<String>,
+    /// The value of a number or of a formula that works out to one.
+    #[serde(default)]
+    pub value: Option<f64>,
+    #[serde(default)]
+    pub bold: bool,
+    #[serde(default)]
+    pub italic: bool,
+    #[serde(default)]
+    pub underline: bool,
+    /// Size of the letters in points.
+    #[serde(default)]
+    pub size: u32,
+    /// `general`, `left`, `center` or `right`.
+    #[serde(default)]
+    pub align: String,
+    /// Number format as the scripting interface numbers it (0 general, 1 fixed, 2 with commas,
+    /// 3 scientific, 4 fractional, 5 dimension, ..) and its accuracy.
+    #[serde(default)]
+    pub number_format: u32,
+    #[serde(default)]
+    pub accuracy: u32,
+    /// Palette index of the colour of the text.
+    #[serde(default)]
+    pub text_color: u32,
+    /// The merged range this cell is part of: top row, left column, bottom row, right column.
+    #[serde(default)]
+    pub merged: Option<[u32; 4]>,
+}
+
+/// A database row of a worksheet: its criteria and the rows Vectorworks worked out from it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DatabaseRow {
+    /// The row of the worksheet.
+    pub row: u32,
+    /// The criteria, written as the formula `=DATABASE(..)`.
+    pub criteria: Option<String>,
+    /// The rows computed, each the cells that hold something (their `row` is that of the
+    /// database row).
+    pub subrows: Vec<Vec<Cell>>,
+}
+
+/// A worksheet shown on a drawing: an image of it on a layer or sheet, in metres.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct WorksheetPlacement {
+    pub id: u64,
+    /// The layer (design or sheet) it is on: its name, and its id in the document.
+    pub layer: String,
+    pub layer_id: Option<u64>,
+    /// Top left corner on the layer (x right, y up), and the size.
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
 }
 
 /// A sheet layer: what is drawn on the paper itself (its title block, notes), in metres on

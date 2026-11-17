@@ -118,7 +118,7 @@ pub fn scene(raw: &Raw, info: Info) -> Scene {
     if 2 * hidden > all {
         meshes.iter_mut().for_each(|m| m.hidden = false);
     }
-    Scene { info, meshes, views: views(raw), texts: texts(raw), sheets: sheets(raw) }
+    Scene { info, meshes, views: views(raw), texts: texts(raw), sheets: sheets(raw), ..Scene::default() }
 }
 
 /// The texts on the design layers, on the elevation of their layer.

@@ -25,6 +25,7 @@ pub mod raw;
 pub mod records;
 pub mod shapes;
 pub mod tri;
+pub mod worksheet;
 
 pub use vwx_core::{Error, Result};
 pub use vwx_model as model;
@@ -108,7 +109,9 @@ pub fn read(data: &[u8]) -> Result<Scene> {
     let unpacked = unpack(data)?;
     let raw = Raw::new(&unpacked)?;
     let objects = raw.records.iter().filter(|r| !matches!(r.kind(), kind::END | kind::USER_DATA)).count();
-    Ok(mesh::scene(&raw, info_of(&unpacked, data.len(), objects)))
+    let mut scene = mesh::scene(&raw, info_of(&unpacked, data.len(), objects));
+    scene.worksheets = worksheet::read(&raw);
+    Ok(scene)
 }
 
 #[cfg(test)]
