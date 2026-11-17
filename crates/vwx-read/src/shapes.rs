@@ -75,6 +75,14 @@ fn placement(r: &Record, at: usize) -> Option<Affine> {
     Some(Affine { rows: [xyz(r, at)?, xyz(r, at + 24)?, xyz(r, at + 48)?], offset: xyz(r, at + 72)? })
 }
 
+/// Where a plug-in object (type 86: a door, a window, a column, a label) is put: what it holds
+/// is drawn in its own coordinates, placed by the matrix at 0xf0 and the offset at 0x138. (Of
+/// the 40 such objects with extrudes in `Residential New Construction.sta` the extrudes of 38
+/// lie inside the box of their object once placed so, and those of 9 without.)
+pub fn plug_in_placement(r: &Record) -> Option<Affine> {
+    placement(r, 0xf0)
+}
+
 /// The way a view looks at the model (type 43, a child of a saved view or of a layer): at 0x9c
 /// nine `f64`, the directions in the document of right on the screen, up on the screen and
 /// towards the eye (sample 140: a view set to 60 and 45 degrees). Returned: right, up, towards

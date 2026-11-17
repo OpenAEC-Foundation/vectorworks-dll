@@ -549,6 +549,9 @@ impl Builder<'_, '_> {
             // left out beside its 3D form; an object without one (a label, a title block) is
             // those shapes
             _ => {
+                // a plug-in object holds its parts in its own coordinates
+                let placed = (r.kind() == kind::PLUG_IN_OBJECT).then(|| shapes::plug_in_placement(r)).flatten().map(|p| p.then(place));
+                let place = placed.as_ref().unwrap_or(place);
                 let before = self.mark(key);
                 for &c in &raw.children[i] {
                     self.walk(c, place, true, key, depth);
@@ -975,6 +978,17 @@ mod tests {
         let u = unpacked(records);
         let scene = scene(&Raw::new(&u).unwrap(), Info::default());
         assert_eq!(scene.meshes.iter().map(|m| (m.name.as_str(), m.hidden)).collect::<Vec<_>>(), [("L", false), ("Tweede laag", true)]);
+    }
+
+    #[test]
+    fn a_plug_in_object_places_what_it_holds() {
+        // as a window of the corpus: put at (2000, 8050), its line from (0, 0) to (1000, 0)
+        let object = record(kind::PLUG_IN_OBJECT, 433, &[(0xf0, 1.0), (0x110, 1.0), (0x130, 1.0), (0x138, 2000.0), (0x140, 8050.0)]);
+        let line = record(kind::LINE, 140, &[(0x80, 1000.0)]);
+        let records = vec![tagged(layer("L", 0.0), 1, 1, 0), tagged(object, 2, 0, 0), tagged(line, 3, 0, 0), tagged(record(kind::END, 88, &[]), 3, 0, 0), tagged(record(kind::END, 88, &[]), 2, 0, 0)];
+        let u = unpacked(records);
+        let scene = scene(&Raw::new(&u).unwrap(), Info::default());
+        assert_eq!(&scene.meshes[0].positions[..6], &[2.0, 8.05, 0.0, 3.0, 8.05, 0.0]);
     }
 
     #[test]

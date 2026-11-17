@@ -231,7 +231,9 @@ pairs `prm0_name`, `prm0_value` (`GlobalId`, `3UrNonhr...`).
 A **plug-in object** (type 86: door, window, slab, space, stair, title block, ..) holds its
 settings in a record too, the last of its records, whose format has the name of the plug-in
 (`Door`, `Window`, `Slab`, `Space`, `Stairs CW`): that name says what the object is. A door or
-window in a wall is a child of the wall.
+window in a wall is a child of the wall. What a plug-in object holds (its 3D parts and its 2D
+shapes) is in its own coordinates: its placement is the matrix at 0xf0 with the offset at 0x138
+(a window of the corpus: offset (2000, 8050, 0), its extrude at (0, 40, 805)).
 
 ### Saved views: types 49 and 43
 
