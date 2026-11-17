@@ -114,16 +114,22 @@ Document-level records before the layers (their parent is the document).
 **Reference table (type 33).** `u32le` size at 0x50, then per reference number 12 bytes from
 0x54: the `u64le` address of the object and a `u32` (0 so far). Number 1 is the first layer.
 
-**Name list (type 55).** A 20-byte head (entry count as `u32le` at 0x58), then entries of
-`u32le` reference number, `u32le` length in bytes, UTF-16LE text. Holds the names of classes,
+**Name list (type 55).** A 12-byte head (entry count as `u32le` at 0x58), then entries of
+`u32le` reference number, `u32le` length in bytes, UTF-16LE text (the list of a new document
+starts with an entry for number 0 without a name). Holds the names of classes,
 symbol definitions, record formats and named objects (pairs 02/05, 02/40: `L1`, `Muren`), not of
 layers.
 
 **Classes (type 94).** One record per class; its reference number at 0x1a is the number objects
 name at 0x20, its name is in the name list. The Dutch default class is `Geen` (number 2).
+Its visibility is the byte at 0xb6: 0 visible, 0xff invisible, 2 greyed (samples 130, 131, 132;
+the values the scripting interface gives). The `u16` at 0x54 is the palette index of its fill
+and bit 0x80 of the byte at 0x50 says objects take the class attributes when made (sample 132).
 
-**Layers (type 31).** Reference number at 0x1a, elevation `f64` at 0x20e (pair 90/95), the name
-at the end: `u32le` length in bytes at 0x2a2, UTF-16LE text, 8 more bytes. The children of the
+**Layers (type 31).** Reference number at 0x1a, elevation `f64` at 0x20e (pair 90/95), the name:
+`u32le` length in bytes at 0x2a2, UTF-16LE text. After it 4 bytes and a second text the same
+way, the level the layer belongs to (`Top of Slab`, `Finish Floor` in
+`Residential New Construction.sta`; empty in a new document). The children of the
 record are the objects on the layer.
 
 **Colour palette.** The `TDMD` record with key `DCDN` (see below): fields 2, 3, 4, 5 are cyan,
@@ -196,6 +202,16 @@ Every drawn object starts alike:
 | 13 rounded rectangle | 204 | as the rectangle, then the width and height of the ellipse its corners are quarters of at 0xbc and 0xc4 (samples 112, 220) |
 | 68 wall | 2274+ | children: plan graphics (lines, polygons), a record, and a CSG solid with the wall's body |
 
+### Saved views: types 49 and 43
+
+A saved view is a type 49 record (89 bytes), a child of the type 51 record that holds them all;
+its name is in the name list under its reference number. Its type 43 child (380 bytes) is the
+way it looks at the model: at 0x9c nine `f64`, the directions in the document of right on the
+screen, up on the screen and towards the eye, and three more, a point (sample 140: the view set
+to 60 and 45 degrees has (0.707, 0.707, 0), (-0.354, 0.354, 0.866), (0.612, -0.612, 0.5); a top
+view the unit matrix). A layer has a type 43 child of its own, the view it was last seen in.
+The other children of a saved view (type 124, user data `svdn` and `ccst`) are not decoded.
+
 ### Solids: type 114 and Parasolid
 
 A type 114 record is the cached solid body of its parent: of a CSG solid (84), an extrude (24),
@@ -237,7 +253,7 @@ direction) and spun surface (a curve turned about an axis). Blend and offset sur
 their faces are filled flat between their edges and counted as approximate.
 
 Of the 641 490 faces in the corpus (plane 84 %, cylinder 7 %, B-surface 3 %, swept 1 %, the
-others under 1 % each) 4 821 are filled flat: 2 194 on blend and 199 on offset surfaces, the
+others under 1 % each) 4 851 are filled flat: 2 194 on blend and 199 on offset surfaces, the
 others faces whose loops could not be laid out in the parameters of their surface (a loop that
 seems to go around more than once, two loops around the axis the same way); 132 give no
 triangles. `Residential New Construction.sta`: all 4 345 faces on their surface.
@@ -267,5 +283,5 @@ type 85 child is a mesh (see the table above).
 ### Not decoded yet
 
 Text (10), cubic vertices of polylines, NURBS curve (111) on its own, slab (71), plug-in object (86), viewport
-(122), records and formats (47, 48), styles (102, 107, 127), saved views, sheet layers, class
+(122), records and formats (47, 48), styles (102, 107, 127), what a saved view shows (its `svdn` and `ccst` user data), sheet layers, class
 attributes and visibility.

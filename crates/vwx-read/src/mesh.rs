@@ -22,7 +22,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
-use vwx_model::{Info, Mesh, Scene};
+use vwx_model::{Info, Mesh, Scene, View};
 
 use crate::raw::{self, kind, Raw};
 use crate::shapes::{self, Affine, P2, P3};
@@ -62,8 +62,30 @@ pub fn scene(raw: &Raw, info: Info) -> Scene {
     if builder.batches.values().all(|b| b.mesh.indices.is_empty()) {
         builder.library();
     }
-    let meshes = builder.batches.into_values().map(|b| b.mesh).filter(|m| !m.indices.is_empty()).collect();
-    Scene { info, meshes }
+    let mut meshes: Vec<Mesh> = builder.batches.into_values().map(|b| b.mesh).filter(|m| !m.indices.is_empty()).collect();
+    // a document may be saved with every class of its model invisible (its sheets show the
+    // model through viewports with their own settings): then nothing would show, so all does
+    if meshes.iter().all(|m| m.hidden) {
+        meshes.iter_mut().for_each(|m| m.hidden = false);
+    }
+    Scene { info, meshes, views: views(raw) }
+}
+
+/// The saved views of a document: a type 49 record each, named in the name list, with the way
+/// it looks at the model in its type 43 child.
+fn views(raw: &Raw) -> Vec<View> {
+    let mut out = Vec::new();
+    for (i, r) in raw.records.iter().enumerate() {
+        if r.kind() != kind::SAVED_VIEW {
+            continue;
+        }
+        let Some(name) = raw.names.get(&r.ref_id()) else { continue };
+        let Some([_, up, eye]) = raw.children[i].iter().map(|&c| &raw.records[c]).find(|c| c.kind() == kind::VIEW).and_then(shapes::view_axes) else {
+            continue;
+        };
+        out.push(View { name: name.clone(), forward: eye.map(|c| -c as f32), up: up.map(|c| c as f32) });
+    }
+    out
 }
 
 /// A symbol definition drawn for the library view: its record, its first index and first vertex
@@ -100,7 +122,9 @@ impl Builder<'_, '_> {
                 Some(class) => format!("{layer} / {class}"),
                 None => layer,
             };
-            Batch { mesh: Mesh { name, color: DEFAULT_COLOR.map(|c| c as f32 / 255.0), colors: Some(Vec::new()), ..Mesh::default() } }
+            // what is in an invisible class starts switched off
+            let hidden = raw.by_ref.get(&key.1).is_some_and(|&class| raw::class_hidden(raw.records[class].bytes));
+            Batch { mesh: Mesh { name, color: DEFAULT_COLOR.map(|c| c as f32 / 255.0), colors: Some(Vec::new()), hidden, ..Mesh::default() } }
         })
     }
 
@@ -548,7 +572,8 @@ mod tests {
     }
 
     fn names(list: &[(u32, &str)]) -> Vec<u8> {
-        let mut r = record(kind::NAMES, RECORD_HEADER + 20, &[]);
+        let mut r = record(kind::NAMES, RECORD_HEADER + 12, &[]);
+        r[RECORD_HEADER + 8..RECORD_HEADER + 12].copy_from_slice(&(list.len() as u32).to_le_bytes());
         for (id, name) in list {
             let text: Vec<u8> = name.encode_utf16().flat_map(u16::to_le_bytes).collect();
             r.extend(id.to_le_bytes());
@@ -655,6 +680,54 @@ mod tests {
         let (lo, hi) = bounds(m);
         assert_eq!((lo[0], hi[0], hi[1], lo[2], hi[2]), (0.0, 1.0, 0.0, 0.0, 3.0));
         assert!((lo[1] + 1.1).abs() < 1e-6, "{lo:?}");
+    }
+
+    #[test]
+    fn saved_view_as_sample_140() {
+        // "Aanzicht A": the model turned 60 degrees about x and 45 about z
+        let (h, q) = (0.5f64.sqrt(), 0.125f64.sqrt());
+        let axes = [h, h, 0.0, -q, q, 0.75f64.sqrt(), 0.375f64.sqrt(), -(0.375f64.sqrt()), 0.5];
+        let reals: Vec<(usize, f64)> = axes.iter().enumerate().map(|(k, v)| (0x9c + 8 * k, *v)).collect();
+        let records = vec![
+            tagged(names(&[(52, "Aanzicht A")]), 1, 0, 0),
+            tagged(record(kind::SAVED_VIEW, 89, &[]), 1, 52, 0),
+            tagged(record(kind::VIEW, 380, &reals), 2, 0, 0),
+            tagged(record(kind::END, 88, &[]), 2, 0, 0),
+        ];
+        let u = unpacked(records);
+        let raw = Raw::new(&u).unwrap();
+        let scene = scene(&raw, Info::default());
+        assert_eq!(scene.views.len(), 1);
+        let view = &scene.views[0];
+        assert_eq!(view.name, "Aanzicht A");
+        // looking down at 30 degrees, to the north-west
+        let near = |a: [f32; 3], b: [f32; 3]| (0..3).all(|k| (a[k] - b[k]).abs() < 1e-6);
+        assert!(near(view.forward, [-0.6123724, 0.6123724, -0.5]) && near(view.up, [-0.35355338, 0.35355338, 0.8660254]), "{view:?}");
+    }
+
+    #[test]
+    fn what_is_in_an_invisible_class_starts_hidden() {
+        // class 7 with the visibility byte of samples 130 (invisible) and 131 (greyed)
+        for (visibility, hidden) in [(0xffu8, true), (2, false), (0, false)] {
+            let mut class = record(kind::CLASS, 188, &[]);
+            class[0xb6] = visibility;
+            let rect = record(kind::RECTANGLE, 188, &[(0xa4, 1.0), (0xac, 1000.0), (0xb4, 500.0)]);
+            // and a rectangle in no class beside it
+            let plain = record(kind::RECTANGLE, 188, &[(0xa4, 1.0), (0xac, 1000.0), (0xb4, 500.0)]);
+            let records = vec![tagged(class, 1, 7, 0), tagged(layer("L", 0.0), 1, 1, 0), tagged(rect, 2, 0, 7), tagged(plain, 2, 0, 0), tagged(record(kind::END, 88, &[]), 2, 0, 0)];
+            let u = unpacked(records);
+            let raw = Raw::new(&u).unwrap();
+            let scene = scene(&raw, Info::default());
+            assert_eq!((scene.meshes.len(), scene.meshes[1].hidden, scene.meshes[0].hidden), (2, hidden, false), "{visibility:#x}");
+        }
+        // with nothing else to see, what is in an invisible class shows
+        let mut class = record(kind::CLASS, 188, &[]);
+        class[0xb6] = 0xff;
+        let rect = record(kind::RECTANGLE, 188, &[(0xa4, 1.0), (0xac, 1000.0), (0xb4, 500.0)]);
+        let records = vec![tagged(class, 1, 7, 0), tagged(layer("L", 0.0), 1, 1, 0), tagged(rect, 2, 0, 7), tagged(record(kind::END, 88, &[]), 2, 0, 0)];
+        let u = unpacked(records);
+        let scene = scene(&Raw::new(&u).unwrap(), Info::default());
+        assert!(!scene.meshes[0].hidden);
     }
 
     #[test]

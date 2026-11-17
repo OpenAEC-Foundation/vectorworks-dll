@@ -110,4 +110,16 @@ pub struct Mesh {
 pub struct Scene {
     pub info: Info,
     pub meshes: Vec<Mesh>,
+    /// The views saved in the document.
+    pub views: Vec<View>,
+}
+
+/// A saved view: the way the model is looked at (Z up; unit vectors).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct View {
+    pub name: String,
+    /// From the eye into the model.
+    pub forward: [f32; 3],
+    /// Up on the screen.
+    pub up: [f32; 3],
 }

@@ -67,7 +67,7 @@ fn document(raw: &Raw, info: Info) -> Document {
             kind::LAYER => {
                 doc.layers.push(Layer { id: i as u64, name: raw::layer_name(r.bytes).unwrap_or_default(), elevation: raw::layer_elevation(r.bytes) / 1000.0, visible: true, ..Layer::default() })
             }
-            kind::CLASS => doc.classes.push(Class { id: r.ref_id() as u64, name: raw.names.get(&r.ref_id()).cloned().unwrap_or_default(), visible: true, fill: None }),
+            kind::CLASS => doc.classes.push(Class { id: r.ref_id() as u64, name: raw.names.get(&r.ref_id()).cloned().unwrap_or_default(), visible: !raw::class_hidden(r.bytes), fill: None }),
             _ => {}
         }
         doc.objects.push(Object {

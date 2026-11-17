@@ -75,6 +75,18 @@ fn placement(r: &Record, at: usize) -> Option<Affine> {
     Some(Affine { rows: [xyz(r, at)?, xyz(r, at + 24)?, xyz(r, at + 48)?], offset: xyz(r, at + 72)? })
 }
 
+/// The way a view looks at the model (type 43, a child of a saved view or of a layer): at 0x9c
+/// nine `f64`, the directions in the document of right on the screen, up on the screen and
+/// towards the eye (sample 140: a view set to 60 and 45 degrees). Returned: right, up, towards
+/// the eye.
+pub fn view_axes(r: &Record) -> Option<[P3; 3]> {
+    let axes = placement(r, 0x9c)?.rows;
+    // three directions square to each other, or it is not a view
+    let dot = |a: P3, b: P3| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let square = (0..3).all(|i| (dot(axes[i], axes[i]) - 1.0).abs() < 1e-6 && dot(axes[i], axes[(i + 1) % 3]).abs() < 1e-6);
+    square.then_some(axes)
+}
+
 /// The ends of a line (type 2): (y1, x1, y2, x2) at 0x68.
 pub fn line(r: &Record) -> Option<[P2; 2]> {
     Some([yx(r, 0x68)?, yx(r, 0x78)?])

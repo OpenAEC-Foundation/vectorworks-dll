@@ -25,6 +25,8 @@ pub mod kind {
     pub const MESH_FACE: u8 = 41;
     /// The points Vectorworks worked out for a profile inside a 3D object.
     pub const PROFILE_GRID: u8 = 42;
+    pub const VIEW: u8 = 43;
+    pub const SAVED_VIEW: u8 = 49;
     pub const NAMES: u8 = 55;
     pub const USER_DATA: u8 = 76;
     pub const SWEEP: u8 = 34;
@@ -105,12 +107,15 @@ impl<'a> Raw<'a> {
     }
 }
 
-/// The name list (type 55): after a 20-byte head, entries of `u32` reference number, `u32`
-/// length in bytes and that many bytes of UTF-16LE.
+/// The name list (type 55): a 12-byte head with the number of entries as its third `u32`, then
+/// entries of `u32` reference number, `u32` length in bytes and that many bytes of UTF-16LE.
+/// (A list may start with an entry for number 0 without a name, as those of new documents do.)
 fn name_list(record: &[u8]) -> Vec<(u32, String)> {
     let mut out = Vec::new();
-    let mut at = container::RECORD_HEADER + 20;
-    while let (Some(id), Some(len)) = (le::u32(record, at), le::u32(record, at + 4)) {
+    let count = le::u32(record, container::RECORD_HEADER + 8).unwrap_or(0);
+    let mut at = container::RECORD_HEADER + 12;
+    for _ in 0..count {
+        let (Some(id), Some(len)) = (le::u32(record, at), le::u32(record, at + 4)) else { break };
         let Some(text) = record.get(at + 8..at + 8 + len as usize) else {
             break;
         };
@@ -125,15 +130,18 @@ pub fn utf16(bytes: &[u8]) -> String {
     String::from_utf16_lossy(&units)
 }
 
-/// A layer record (type 31): its name is the last field, a `u32` length in bytes and UTF-16LE,
-/// followed by 8 bytes; its elevation is an `f64` at 0x20e.
+/// A layer record (type 31): its name at 0x2a2, a `u32` length in bytes and UTF-16LE (other
+/// texts follow it); its elevation is an `f64` at 0x20e.
 pub fn layer_name(record: &[u8]) -> Option<String> {
-    let n = record.len();
-    // the length field sits where its value says the name ends 8 bytes before the record does
-    (2..=510usize).step_by(2).find_map(|len| {
-        let at = n.checked_sub(8 + len + 4)?;
-        (le::u32(record, at)? as usize == len).then(|| utf16(&record[at + 4..at + 4 + len]))
-    })
+    let len = le::u32(record, 0x2a2)? as usize;
+    (len.is_multiple_of(2) && len <= 2048).then(|| record.get(0x2a6..0x2a6 + len).map(utf16))?
+}
+
+/// True for a class (type 94) that is set invisible: the byte at 0xb6 is 0 for a visible class,
+/// 0xff for an invisible one and 2 for a greyed one (samples 130, 131, 132), the values the
+/// scripting interface gives for the visibility of a class (0, -1, 2).
+pub fn class_hidden(record: &[u8]) -> bool {
+    record.get(0x19) == Some(&kind::CLASS) && record.get(0xb6) == Some(&0xff)
 }
 
 pub fn layer_elevation(record: &[u8]) -> f64 {
