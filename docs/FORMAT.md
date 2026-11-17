@@ -73,7 +73,9 @@ Header (0x50 bytes, little-endian):
 | 0x10 | `u64le` | an address or 0 (not known: differs per object) |
 | 0x18 | `u8` | 0 |
 | 0x19 | `u8` | object type |
+| 0x1a | `u32le` | reference number of the object, 0 for none (pair 02/05: a named line gets one; layers, classes, symbol definitions and record formats always have one) |
 | 0x1f | `u8` | flags, `0x40` or `0x41` |
+| 0x20 | `u32le` | reference number of the class of the object (pair 02/40) |
 | 0x26 | `u64le` | address of the parent object |
 | 0x2e | `u16` | `0x0011` objects, `0x0012`/`0x0002` user data and resources (not settled) |
 | 0x38 | 16 bytes | UUID of the object (zero in some records) |
@@ -105,14 +107,104 @@ tree in depth-first order, so the tree follows from the parent addresses at 0x26
 A container holds the address of its first child at 0x8c (seen in groups, symbol definitions
 and plug-in objects). User data records follow the object they belong to as its children.
 
+## Document tables
+
+Document-level records before the layers (their parent is the document).
+
+**Reference table (type 33).** `u32le` size at 0x50, then per reference number 12 bytes from
+0x54: the `u64le` address of the object and a `u32` (0 so far). Number 1 is the first layer.
+
+**Name list (type 55).** A 20-byte head (entry count as `u32le` at 0x58), then entries of
+`u32le` reference number, `u32le` length in bytes, UTF-16LE text. Holds the names of classes,
+symbol definitions, record formats and named objects (pairs 02/05, 02/40: `L1`, `Muren`), not of
+layers.
+
+**Classes (type 94).** One record per class; its reference number at 0x1a is the number objects
+name at 0x20, its name is in the name list. The Dutch default class is `Geen` (number 2).
+
+**Layers (type 31).** Reference number at 0x1a, elevation `f64` at 0x20e (pair 90/95), the name
+at the end: `u32le` length in bytes at 0x2a2, UTF-16LE text, 8 more bytes. The children of the
+record are the objects on the layer.
+
+**Colour palette.** The `TDMD` record with key `DCDN` (see below): fields 2, 3, 4, 5 are cyan,
+magenta, yellow and black of each colour as `f32` 0..1, field 1 the number of colours in use.
+RGB = (1 - ink)(1 - black). Colours 0..=1238 are the same in every document (256 white, 257
+black, 1237 red, 1238 blue); colours a document adds follow (sample 100: 1239). Checked against
+the scripting API for all 1239 and for an added colour.
+
+## User data (type 76) and `TDMD`
+
+A user data record follows the object it belongs to, as its child. Its payload starts with a
+tag. Most have the tag `TDMD`:
+
+```text
+"TDMD" · u16 version (5) · key, 4 letters stored reversed · u16 field count · u32 size of the rest
+field count x (u16 field number · u32 offset, counted from the end of this 16-byte head)
+per field: u16 type · u32 count · values
+```
+
+Types seen: 1 (one byte per value), 6 (`f64`), 8 (four bytes per value: `f32` or `u32`). Keys
+seen at document level: `dprv`, `DPDN`, `shsm`, `DCDN` (palette); on drawn objects `OPhI` and
+others, not decoded.
+
 ## Coordinates
 
-`f64`, millimetres, whatever the document units (seen: 0.79375 = 1/32 inch, 39.6875 in an
-imperial library file).
+`f64`, millimetres, whatever the document units. 2D points are stored as (y, x); 3D points as
+(x, y, z). 3D objects hold their height in the document: an extrude made on a layer with
+elevation 3000 has 3000 in its own placement (sample 105). 2D objects lie on their layer.
+
+A placement is nine `f64` (the images of the local x, y and z axes, in that order) followed by
+the offset: `world = x·row0 + y·row1 + z·row2 + offset`.
 
 ## Objects
 
-Payloads start alike for drawn objects: 24 bytes of attributes at 0x50, then at 0x68 four `f64`
-(the bounding box). A line is 140 bytes, a rectangle 188, an extrude 324, a group 204, a symbol
-definition 372. The fields are decoded from the sample ladder (`docs/ORACLE.md`); nothing is
-settled yet.
+Every drawn object starts alike:
+
+| Offset | Type | Content |
+|---|---|---|
+| 0x50 | `u32` | 2 (not known) |
+| 0x54 | `u16` | 4 for 2D objects, 1 for a locus, 2 for an extrude (not known) |
+| 0x56 | `u16` | palette index, 257 by default (fill foreground, assumed) |
+| 0x58 | `u16` | palette index of the fill (pair 10/41: 256 white to 1237 red) |
+| 0x5a | `u16` | palette index of the pen (pair 02/42: 257 black to 1238 blue) |
+| 0x5c | `u16` | palette index, 256 by default (pen background, assumed) |
+| 0x5e | 2 x `u8` | 100, 100 (opacities, assumed) |
+| 0x68 | 4 x `f64` | bounding box in plan: top, left, bottom, right |
+
+| Type | Size | Payload after the common part |
+|---|---|---|
+| 2 line | 140 | instead of the bounding box: y1, x1, y2, x2 (samples 02, 03, 04, 07) |
+| 17 locus | 120 | y, x at 0x68 (sample 18) |
+| 3 rectangle, 4 oval | 188 | origin (y, x) at 0x8c; direction (y, x) at 0x9c; width along the direction at 0xac; height to its left at 0xb4. An oval is the ellipse in that frame (samples 10, 11, 12, 17) |
+| 5 polygon | 0x90 + 16n | `u16` count at 0x8e; points (y, x) from 0x90 (samples 13, 14) |
+| 6 arc | 210 | start point at 0x90, end point at 0xa0, centre at 0xb0 (each y, x); at 0xc0 an angle a and at 0xc8 the sweep, in degrees: the arc runs from 90 - (a + sweep) to 90 - a, counter-clockwise from the x axis (samples 15, 16) |
+| 25 3D polygon | 0xd2 + 24n | six `f64` at 0x9c (largest then smallest x, y, z); `u16` count at 0xd0; points from 0xd2 (sample 30) |
+| 24 extrude | 324 | addresses of its first and last child at 0x8c, 0x94; local box at 0x9c (largest then smallest x, y, z); placement at 0xcc; bottom and top along local z at 0x130, 0x138. The children are the profile, 2D objects in the local xy plane (samples 20 to 27) |
+| 15 symbol | 280 | `u32` reference number of the definition at 0x8e; placement at 0x96; scale factors along the local axes at 0x100 (samples 50, 51) |
+| 16 symbol definition | 372 | its children are the content; found by its reference number |
+| 11 group | 204 | its children |
+| 84 CSG solid | 386 | children: a type 114 record with the result and the operands |
+| 68 wall | 2274+ | children: plan graphics (lines, polygons), a record, and a CSG solid with the wall's body |
+
+### Solids: type 114 and Parasolid
+
+A type 114 record holds the result of a solid operation and the body of a wall. After 10 bytes
+at 0x50: `u16`, `u32` total size, then 15 slots of (`u16` section number or `0xffff`, `u32`
+offset counted from 0x60).
+
+- section 0: points, three `f64` each;
+- section 13: polylines through them, 6 bytes each (`u16` point count, `u32` first point): the
+  edges of the solid (wall of sample 60: 24 points, 12 edges of a box 5000 x 150 x 3000);
+- section 19: a 6-byte head and a **Parasolid** transmit file, binary, starting
+  `PS...: TRANSMIT FILE created by modeller version 3801180` with schema `SCH_3801180_38101_13006`.
+  The solid itself. Parasolid XT is a public format (Siemens publishes the XT Format Reference);
+  reading it is the next layer of the reader.
+
+Solids made as primitives (type 95: sphere, cone, hemisphere) have a type 85 child instead.
+
+### Not decoded yet
+
+Polyline (21), text (10), rounded rectangle (13), sweep (34), multiple extrude (38), mesh (40,
+41), NURBS (111, 113), type 42 under profile shapes, slab (71), plug-in object (86), viewport
+(122), records and formats (47, 48), styles (102, 107, 127), saved views, sheet layers, class
+attributes and visibility.

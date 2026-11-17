@@ -8,6 +8,7 @@ const USAGE: &str = "usage:
   vwx info <file.vwx>                       document facts
   vwx read <file.vwx>                       read the file; meshes and triangles per mesh
   vwx document <file.vwx>                   the neutral model as JSON
+  vwx mesh <file.vwx> [--obj out.obj]       bounds and triangles of the meshes; writes an OBJ
 analysis:
   vwx probe <file> [--pretty]               container, compressed streams, strings, entropy (JSON)
   vwx survey <dir>                          one line per file: size, head bytes, streams
@@ -43,7 +44,7 @@ fn positional(args: &[String]) -> Vec<&str> {
             skip = false;
         } else if let Some(name) = a.strip_prefix("--").or_else(|| a.strip_prefix('-').filter(|n| n.len() == 1)) {
             // options with a value
-            skip = matches!(name, "gap" | "stream" | "min" | "out" | "o" | "depth" | "document");
+            skip = matches!(name, "gap" | "stream" | "min" | "out" | "o" | "depth" | "document" | "obj");
         } else {
             out.push(a.as_str());
         }
@@ -162,6 +163,36 @@ fn run(args: &[String]) -> Result<Option<Value>, String> {
                     "name": m.name, "triangles": m.indices.len() / 3, "objects": m.elements.len(), "hidden": m.hidden,
                 })).collect::<Vec<_>>(),
             })))
+        }
+        "mesh" => {
+            // bounds (metres) and triangle count of what the reader draws; --obj writes it
+            let path = file()?;
+            let scene = vwx_read::read(&read(path)?).map_err(|e| format!("{path}: {e}"))?;
+            let (mut lo, mut hi, mut triangles) = ([f32::MAX; 3], [f32::MIN; 3], 0);
+            let mut obj = String::new();
+            let mut base = 1;
+            for m in &scene.meshes {
+                triangles += m.indices.len() / 3;
+                for p in m.positions.chunks(3) {
+                    for k in 0..3 {
+                        lo[k] = lo[k].min(p[k]);
+                        hi[k] = hi[k].max(p[k]);
+                    }
+                    obj.push_str(&format!("v {} {} {}
+", p[0], p[1], p[2]));
+                }
+                obj.push_str(&format!("g {}
+", m.name.replace(' ', "_")));
+                for t in m.indices.chunks(3) {
+                    obj.push_str(&format!("f {} {} {}
+", base + t[0], base + t[1], base + t[2]));
+                }
+                base += (m.positions.len() / 3) as u32;
+            }
+            if let Some(out) = opt(args, "--obj") {
+                std::fs::write(out, obj).map_err(|e| format!("{out}: {e}"))?;
+            }
+            Ok(Some(json!({"meshes": scene.meshes.len(), "triangles": triangles, "min": if triangles > 0 { json!(lo) } else { Value::Null }, "max": if triangles > 0 { json!(hi) } else { Value::Null }})))
         }
         "probe" => to(serde_json::to_value(Probe::of(&read(file()?)?))),
         "survey" => survey(Path::new(file()?)).map(|_| None),

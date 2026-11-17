@@ -44,7 +44,7 @@ fn every_sample_reads() {
             }
         };
         objects += doc.objects.len();
-        let scene = vwx_read::mesh::scene(&doc);
+        let scene = vwx_read::read(&data).expect("a file that opens also reads");
         let n: usize = scene.meshes.iter().map(|m| m.indices.len() / 3).sum();
         triangles += n;
         with_meshes += usize::from(n > 0);

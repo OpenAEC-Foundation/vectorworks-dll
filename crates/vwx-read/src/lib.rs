@@ -1,5 +1,5 @@
-//! Reads a Vectorworks `.vwx` file into the neutral model ([`vwx_model::Document`]) and into
-//! meshes for a viewer ([`vwx_model::Scene`]).
+//! Reads a Vectorworks `.vwx` file (or `.sta` template) into the neutral model
+//! ([`vwx_model::Document`]) and into meshes for a viewer ([`vwx_model::Scene`]).
 //!
 //! ```no_run
 //! let bytes = std::fs::read("house.vwx")?;
@@ -12,19 +12,26 @@
 //!
 //! Everything works on bytes, so the reader also runs in the browser.
 //!
-//! **Status:** the container, the records and their tree are read ([`open`] lists every object
-//! with its type and parent); object geometry is not decoded yet, so [`read`] gives a scene
-//! without meshes. See `docs/ARCHITECTURE.md`.
+//! **Status:** every object of a file is listed with its type, name, layer, class and parent
+//! ([`open`]); [`read`] draws extrudes, 3D polygons, flat 2D shapes and placed symbols. Solids
+//! kept as Parasolid bodies (walls, CSG solids, spheres), meshes, sweeps and NURBS are not drawn
+//! yet. See `docs/ARCHITECTURE.md`.
 
+pub mod dmdt;
 pub mod kinds;
 pub mod mesh;
+pub mod palette;
+pub mod raw;
+pub mod shapes;
+pub mod tri;
 
 pub use vwx_core::{Error, Result};
 pub use vwx_model as model;
-use vwx_model::{Document, Info, Object, Scene};
+use vwx_model::{Class, Document, Info, Layer, Object, Scene};
 
-/// True when `data` starts like a Vectorworks file (see [`vwx_core::header`]: known for
-/// Vectorworks 9 to 2010 so far, so callers also go by the extension).
+use raw::{kind, Raw};
+
+/// True when `data` starts like a Vectorworks file (also the old versions the reader refuses).
 pub fn sniff(data: &[u8]) -> bool {
     vwx_core::Header::parse(data).is_some()
 }
@@ -35,43 +42,76 @@ pub fn info(data: &[u8]) -> Info {
     Info { size: data.len() as u64, version: header.map(|h| h.product()), ..Info::default() }
 }
 
-/// Reads a document: every object with its type and its parent.
-pub fn open(data: &[u8]) -> Result<Document> {
+fn unpack(data: &[u8]) -> Result<vwx_core::container::Unpacked> {
     if data.is_empty() {
         return Err(Error::NotVwx("the file is empty".into()));
     }
-    let unpacked = vwx_core::container::unpack(data)?;
-    let records = vwx_core::container::records(&unpacked.body)?;
-    let parents = vwx_core::container::parents(&records);
-    let objects: Vec<Object> = records
-        .iter()
-        .zip(&parents)
-        .enumerate()
-        // user data and list ends are part of their object, not objects themselves
-        .filter(|(_, (r, _))| !matches!(r.kind(), 0 | 76))
-        .map(|(i, (r, parent))| Object {
+    vwx_core::container::unpack(data)
+}
+
+fn info_of(unpacked: &vwx_core::container::Unpacked, size: usize, objects: usize) -> Info {
+    let header = &unpacked.header;
+    Info {
+        version: Some(header.product()),
+        application: Some(format!("Vectorworks {}.{}.{} build {}", header.saved.major, header.saved.minor, header.saved.patch, header.build)),
+        size: size as u64,
+        objects,
+    }
+}
+
+fn document(raw: &Raw, info: Info) -> Document {
+    let mut doc = Document { info, ..Document::default() };
+    for (i, r) in raw.records.iter().enumerate() {
+        match r.kind() {
+            kind::END | kind::USER_DATA => continue,
+            kind::LAYER => doc.layers.push(Layer {
+                id: i as u64,
+                name: raw::layer_name(r.bytes).unwrap_or_default(),
+                elevation: raw::layer_elevation(r.bytes) / 1000.0,
+                visible: true,
+                ..Layer::default()
+            }),
+            kind::CLASS => doc.classes.push(Class {
+                id: r.ref_id() as u64,
+                name: raw.names.get(&r.ref_id()).cloned().unwrap_or_default(),
+                visible: true,
+                fill: None,
+            }),
+            _ => {}
+        }
+        doc.objects.push(Object {
             id: i as u64,
             kind: match kinds::name(r.kind()) {
                 "?" => format!("unknown:{}", r.kind()),
                 name => name.to_string(),
             },
-            parent: parent.map(|p| p as u64),
-            ..Object::default()
-        })
-        .collect();
-    let header = &unpacked.header;
-    let info = Info {
-        version: Some(header.product()),
-        application: Some(format!("Vectorworks {}.{}.{} build {}", header.saved.major, header.saved.minor, header.saved.patch, header.build)),
-        size: data.len() as u64,
-        objects: objects.len(),
-    };
-    Ok(Document { info, objects, ..Document::default() })
+            name: match r.kind() {
+                kind::LAYER => raw::layer_name(r.bytes),
+                _ => raw.name(i).map(str::to_string),
+            },
+            layer: raw.layer_of(i).filter(|&l| l != i).map(|l| l as u64),
+            class: (r.class_id() != 0).then_some(r.class_id() as u64),
+            parent: raw.parents[i].map(|p| p as u64),
+            fields: Vec::new(),
+        });
+    }
+    doc.info.objects = doc.objects.len();
+    doc
+}
+
+/// Reads a document: every object with its type, name, layer, class and parent.
+pub fn open(data: &[u8]) -> Result<Document> {
+    let unpacked = unpack(data)?;
+    let raw = Raw::new(&unpacked)?;
+    Ok(document(&raw, info_of(&unpacked, data.len(), 0)))
 }
 
 /// Reads a document and makes the meshes a viewer draws.
 pub fn read(data: &[u8]) -> Result<Scene> {
-    open(data).map(|doc| mesh::scene(&doc))
+    let unpacked = unpack(data)?;
+    let raw = Raw::new(&unpacked)?;
+    let objects = raw.records.iter().filter(|r| !matches!(r.kind(), kind::END | kind::USER_DATA)).count();
+    Ok(mesh::scene(&raw, info_of(&unpacked, data.len(), objects)))
 }
 
 #[cfg(test)]

@@ -14,6 +14,8 @@
 //! |---|---|---|
 //! | 0x00 | `u64` | length of the record |
 //! | 0x19 | `u8` | object type, as the scripting API numbers them (2 line, 24 extrude, 68 wall, ...) |
+//! | 0x1a | `u32` | reference number of the object (0: none) |
+//! | 0x20 | `u32` | reference number of its class |
 //! | 0x26 | `u64` | address of the parent object when the file was saved |
 //! | 0x38 | 16 bytes | UUID of the object |
 //! | 0x50 | | payload, by object type |
@@ -79,6 +81,17 @@ impl<'a> Record<'a> {
     /// The object type (scripting API numbering); 0 ends the children of a container.
     pub fn kind(&self) -> u8 {
         self.bytes[0x19]
+    }
+
+    /// The reference number of the object: its index in the document's reference table and
+    /// the key of its name in the name list; 0 for objects without one.
+    pub fn ref_id(&self) -> u32 {
+        le::u32(self.bytes, 0x1a).unwrap_or(0)
+    }
+
+    /// The reference number of the class the object is in.
+    pub fn class_id(&self) -> u32 {
+        le::u32(self.bytes, 0x20).unwrap_or(0)
     }
 
     /// Address of the parent object when the file was saved; only equality means something.

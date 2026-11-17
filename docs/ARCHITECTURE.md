@@ -34,15 +34,15 @@ Black-box only (see the clean-room rules in the README):
 | Analysis tools: probe, survey, scan (zlib streams, strings, entropy), diff, hex, unpack, records, tree | **done** | unit tests |
 | Header: versions (made with, saved by), lengths, build | **done** for files saved by VW 2023 and 2027; older headers recognised only | 787 corpus files |
 | Container: Snappy blocks, records, object types, object tree | **done** (`vwx_core::container`) | 787 of 787 corpus files open, 2.2 M objects, 26 s |
-| Document settings: units, origin, layer list, class list | not started | — |
-| 2D primitives: line, rectangle, polygon, polyline, arc, circle, text | not started | — |
-| 3D primitives: extrude, multiple extrude, sweep, 3D polygon, mesh, generic solid | not started | — |
-| Symbols: definitions, instances (placement, scale, rotation) | not started | — |
-| Groups and nesting | not started | — |
-| Walls (path, thickness, height from layer / bound to stories, components) | not started | — |
+| Document tables: reference table, name list, classes, layers (name, elevation), colour palette | **done**; units and origin, class attributes and visibility open | ladder samples; palette against the scripting API |
+| 2D primitives: line, rectangle, oval, polygon, arc, circle, locus | **done**; polyline, rounded rectangle, text open | ladder samples 02 to 18 |
+| 3D primitives: extrude, 3D polygon | **done**; multiple extrude, sweep, mesh, NURBS open | meshes equal to Vectorworks' STL export for samples 20 to 27, 30 |
+| Symbols: definitions, instances (placement, scale) | **done** | STL export of samples 50, 51 |
+| Groups and nesting | **done** | sample 43 |
+| Solids as Parasolid bodies (walls, CSG solids, slabs, primitives): type 114 section 19, type 85 | found, not read; the wire frame (sections 0 and 13) is understood | — |
 | Slabs, roofs, columns, doors, windows, stairs, spaces | not started | — |
 | Records and IFC data attached to objects | not started | — |
-| Viewer meshes (`vwx_read::read`) | helpers only (`mesh::add_prism`) | — |
+| Viewer meshes (`vwx_read::read`): per layer and class, objects pickable, colours from the palette | **started**: 71 of the 787 corpus files give meshes (library files hold only symbol definitions; walls and solids wait for Parasolid) | STL comparison `tools/compare_stl.py` |
 | C ABI: `vwx_open`, `vwx_open_bytes`, `vwx_query` (info, probe, document, objects), `vwx_free`, `vwx_close` | **done** (answers grow with the reader) | unit tests |
 
 ## Crates
