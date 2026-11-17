@@ -96,14 +96,7 @@ impl Header {
             let (v, _) = Version::parse(rest.strip_prefix(b"VectorWorks ")?)?;
             (v, v)
         };
-        Some(Header {
-            created,
-            saved,
-            len,
-            document_len,
-            build: crate::be::u32(data, 0x50).unwrap_or(0),
-            file_size: crate::be::u32(data, 0x54).unwrap_or(0),
-        })
+        Some(Header { created, saved, len, document_len, build: crate::be::u32(data, 0x50).unwrap_or(0), file_size: crate::be::u32(data, 0x54).unwrap_or(0) })
     }
 
     /// The marketing name of the version that saved the file.

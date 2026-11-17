@@ -20,6 +20,9 @@ FIXES = {
     "LIST": "node_id:d owner:p next:p previous:p unknown:d list_length:d block_length:d size_of_entry:d list_block:p",
     # index_map_offset is later than 13006
     "POINTER_LIS_BLOCK": "n_entries:d next_block:p entries:p[]",
+    # the reference prints `centre` before `sense`; read that way the centre and axes of the
+    # ellipses in files are not numbers. As in every other curve, `sense` comes first
+    "ELLIPSE": "node_id:d attributes_groups:p owner:p next:p previous:p geometric_owner:p sense:c centre:v normal:v x_axis:v major_radius:f minor_radius:f",
     "REAL_VALUES": "values:f[]",
     "FIELD_NAMES": "names:p[]",
     "TAG_VALUES": "values:d[]",

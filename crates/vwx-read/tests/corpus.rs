@@ -49,10 +49,6 @@ fn every_sample_reads() {
         triangles += n;
         with_meshes += usize::from(n > 0);
     }
-    println!(
-        "{} of {} files open, {objects} objects; {with_meshes} files with meshes, {triangles} triangles",
-        files.len() - failed,
-        files.len()
-    );
+    println!("{} of {} files open, {objects} objects; {with_meshes} files with meshes, {triangles} triangles", files.len() - failed, files.len());
     assert_eq!(failed, 0);
 }

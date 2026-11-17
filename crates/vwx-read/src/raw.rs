@@ -108,7 +108,9 @@ fn name_list(record: &[u8]) -> Vec<(u32, String)> {
     let mut out = Vec::new();
     let mut at = container::RECORD_HEADER + 20;
     while let (Some(id), Some(len)) = (le::u32(record, at), le::u32(record, at + 4)) {
-        let Some(text) = record.get(at + 8..at + 8 + len as usize) else { break };
+        let Some(text) = record.get(at + 8..at + 8 + len as usize) else {
+            break;
+        };
         out.push((id, utf16(text)));
         at += 8 + len as usize;
     }

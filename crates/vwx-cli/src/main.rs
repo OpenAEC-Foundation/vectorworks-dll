@@ -87,13 +87,7 @@ fn as_numbers(data: &[u8]) -> String {
     use vwx_core::{be, le};
     match data.len() {
         2 => format!("u16 le {} be {}", le::u16(data, 0).unwrap(), be::u16(data, 0).unwrap()),
-        4 => format!(
-            "u32 le {} be {}; f32 le {} be {}",
-            le::u32(data, 0).unwrap(),
-            be::u32(data, 0).unwrap(),
-            f32::from_bits(le::u32(data, 0).unwrap()),
-            f32::from_bits(be::u32(data, 0).unwrap())
-        ),
+        4 => format!("u32 le {} be {}; f32 le {} be {}", le::u32(data, 0).unwrap(), be::u32(data, 0).unwrap(), f32::from_bits(le::u32(data, 0).unwrap()), f32::from_bits(be::u32(data, 0).unwrap())),
         8 => format!("u64 le {}; f64 le {} be {}", le::u64(data, 0).unwrap(), le::f64(data, 0).unwrap(), be::f64(data, 0).unwrap()),
         _ => String::new(),
     }
@@ -105,7 +99,13 @@ fn print_diff(label: &str, a: &[u8], b: &[u8], gap: usize) -> usize {
     for c in &changes {
         let (sa, sb) = (&a[c.a..c.a + c.a_len], &b[c.b..c.b + c.b_len]);
         println!("  a 0x{:x} +{}  ->  b 0x{:x} +{}", c.a, c.a_len, c.b, c.b_len);
-        let show = |s: &[u8]| if s.len() > 48 { format!("{} ...", hex::bytes(&s[..48])) } else { hex::bytes(s) };
+        let show = |s: &[u8]| {
+            if s.len() > 48 {
+                format!("{} ...", hex::bytes(&s[..48]))
+            } else {
+                hex::bytes(s)
+            }
+        };
         println!("    a: {}", show(sa));
         println!("    b: {}", show(sb));
         if c.a_len == c.b_len && !as_numbers(sa).is_empty() {
@@ -116,12 +116,7 @@ fn print_diff(label: &str, a: &[u8], b: &[u8], gap: usize) -> usize {
 }
 
 fn survey(dir: &Path) -> Result<(), String> {
-    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
-        .map_err(|e| format!("{}: {e}", dir.display()))?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.is_file())
-        .collect();
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?.flatten().map(|e| e.path()).filter(|p| p.is_file()).collect();
     files.sort();
     for path in files {
         let data = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -180,21 +175,34 @@ fn run(args: &[String]) -> Result<Option<Value>, String> {
                         lo[k] = lo[k].min(p[k]);
                         hi[k] = hi[k].max(p[k]);
                     }
-                    obj.push_str(&format!("v {} {} {}
-", p[0], p[1], p[2]));
+                    obj.push_str(&format!(
+                        "v {} {} {}
+",
+                        p[0], p[1], p[2]
+                    ));
                 }
-                obj.push_str(&format!("g {}
-", m.name.replace(' ', "_")));
+                obj.push_str(&format!(
+                    "g {}
+",
+                    m.name.replace(' ', "_")
+                ));
                 for t in m.indices.chunks(3) {
-                    obj.push_str(&format!("f {} {} {}
-", base + t[0], base + t[1], base + t[2]));
+                    obj.push_str(&format!(
+                        "f {} {} {}
+",
+                        base + t[0],
+                        base + t[1],
+                        base + t[2]
+                    ));
                 }
                 base += (m.positions.len() / 3) as u32;
             }
             if let Some(out) = opt(args, "--obj") {
                 std::fs::write(out, obj).map_err(|e| format!("{out}: {e}"))?;
             }
-            Ok(Some(json!({"meshes": scene.meshes.len(), "triangles": triangles, "min": if triangles > 0 { json!(lo) } else { Value::Null }, "max": if triangles > 0 { json!(hi) } else { Value::Null }})))
+            Ok(Some(
+                json!({"meshes": scene.meshes.len(), "triangles": triangles, "min": if triangles > 0 { json!(lo) } else { Value::Null }, "max": if triangles > 0 { json!(hi) } else { Value::Null }}),
+            ))
         }
         "xt" => {
             // the Parasolid bodies of a file (or of raw XT data): node counts, and what fails
@@ -212,6 +220,10 @@ fn run(args: &[String]) -> Result<Option<Value>, String> {
             let (mut faces, mut approximate, mut skipped, mut triangles) = (0usize, 0usize, 0usize, 0usize);
             let mut straight = std::collections::BTreeMap::<String, usize>::new();
             let mut approximate_by = std::collections::BTreeMap::<String, usize>::new();
+            // edges between triangles: used once each way (as in a closed, consistently turned
+            // skin), twice the same way (one of the two faces is inside out), or otherwise
+            let (mut paired, mut unpaired) = (0usize, 0usize);
+            let mut same_way = std::collections::BTreeMap::<String, usize>::new();
             let (mut lo, mut hi) = ([f64::MAX; 3], [f64::MIN; 3]);
             let mut obj = String::new();
             let mut obj_base = 1u32;
@@ -237,6 +249,56 @@ fn run(args: &[String]) -> Result<Option<Value>, String> {
                             *approximate_by.entry(format!("{name}: {why}")).or_default() += 1;
                         }
                         triangles += mesh.triangles.len();
+                        {
+                            let (mut blo, mut bhi) = ([f64::MAX; 3], [f64::MIN; 3]);
+                            for p in &mesh.positions {
+                                for a in 0..3 {
+                                    blo[a] = blo[a].min(p[a]);
+                                    bhi[a] = bhi[a].max(p[a]);
+                                }
+                            }
+                            let grain = (0..3).map(|a| bhi[a] - blo[a]).fold(0.0, f64::max).max(1e-12) * 1e-7;
+                            let mut ids = std::collections::HashMap::<[i64; 3], u32>::new();
+                            let welded: Vec<u32> = mesh
+                                .positions
+                                .iter()
+                                .map(|p| {
+                                    let n = ids.len() as u32;
+                                    *ids.entry(p.map(|c| (c / grain).round() as i64)).or_insert(n)
+                                })
+                                .collect();
+                            let name = |t: usize| {
+                                let k = mesh.face_starts.partition_point(|f| f.0 <= t).saturating_sub(1);
+                                vwx_xt::schema::base(mesh.face_starts.get(k).map_or(0, |f| f.1)).map_or("none", |b| b.0)
+                            };
+                            let mut uses = std::collections::HashMap::<(u32, u32), (Vec<usize>, Vec<usize>)>::new();
+                            for (t, tri) in mesh.triangles.iter().enumerate() {
+                                for k in 0..3 {
+                                    let (a, b) = (welded[tri[k] as usize], welded[tri[(k + 1) % 3] as usize]);
+                                    if a == b {
+                                        continue;
+                                    }
+                                    let e = uses.entry((a.min(b), a.max(b))).or_default();
+                                    if a < b {
+                                        e.0.push(t)
+                                    } else {
+                                        e.1.push(t)
+                                    }
+                                }
+                            }
+                            for (f, b) in uses.values() {
+                                match (f.len(), b.len()) {
+                                    (1, 1) => paired += 1,
+                                    (2, 0) | (0, 2) => {
+                                        let both = if f.len() == 2 { f } else { b };
+                                        let mut names = [name(both[0]), name(both[1])];
+                                        names.sort();
+                                        *same_way.entry(names.join(" | ")).or_default() += 1;
+                                    }
+                                    _ => unpaired += 1,
+                                }
+                            }
+                        }
                         for p in &mesh.positions {
                             for a in 0..3 {
                                 lo[a] = lo[a].min(p[a]);
@@ -264,6 +326,7 @@ fn run(args: &[String]) -> Result<Option<Value>, String> {
             Ok(Some(json!({
                 "bodies": starts.len(), "parsed": ok, "nodes": nodes, "schemas": schemas, "types": kinds, "errors": errors,
                 "faces": faces, "approximate_faces": approximate, "skipped_faces": skipped, "triangles": triangles, "bounds": bounds, "straight_edges_by_curve": straight, "approximate_by_surface": approximate_by,
+                "edges": {"paired": paired, "unpaired": unpaired, "same_way_by_surfaces": same_way},
             })))
         }
         "probe" => to(serde_json::to_value(Probe::of(&read(file()?)?))),
@@ -305,8 +368,18 @@ fn run(args: &[String]) -> Result<Option<Value>, String> {
             let h = &u.header;
             println!(
                 "{}: made with VW{}.{}.{}, saved by {} (VW{}.{}.{}, build {}); document header {} bytes; {} blocks, {} bytes unpacked",
-                path, h.created.major, h.created.minor, h.created.patch, h.product(), h.saved.major, h.saved.minor, h.saved.patch,
-                h.build, u.document.len(), u.blocks, u.body.len()
+                path,
+                h.created.major,
+                h.created.minor,
+                h.created.patch,
+                h.product(),
+                h.saved.major,
+                h.saved.minor,
+                h.saved.patch,
+                h.build,
+                u.document.len(),
+                u.blocks,
+                u.body.len()
             );
             if let Some(out) = opt(args, "--out") {
                 std::fs::write(out, &u.body).map_err(|e| format!("{out}: {e}"))?;

@@ -19,9 +19,7 @@ impl Palette {
     pub fn from_data(data: &Data) -> Option<Palette> {
         let [c, m, y, k] = [2, 3, 4, 5].map(|n| data.field(n).map(|f| f.f32s()));
         let (c, m, y, k) = (c?, m?, y?, k?);
-        let colors = (0..c.len().min(m.len()).min(y.len()).min(k.len()))
-            .map(|i| [c[i], m[i], y[i]].map(|ink| ((1.0 - ink) * (1.0 - k[i]) * 255.0).round().clamp(0.0, 255.0) as u8))
-            .collect();
+        let colors = (0..c.len().min(m.len()).min(y.len()).min(k.len())).map(|i| [c[i], m[i], y[i]].map(|ink| ((1.0 - ink) * (1.0 - k[i]) * 255.0).round().clamp(0.0, 255.0) as u8)).collect();
         Some(Palette { colors })
     }
 

@@ -8,10 +8,12 @@ fn cross(o: P2, a: P2, b: P2) -> f64 {
 
 /// Twice the signed area: positive for a counter-clockwise polygon.
 pub fn area2(poly: &[P2]) -> f64 {
-    (0..poly.len()).map(|i| {
-        let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
-        a[0] * b[1] - b[0] * a[1]
-    }).sum()
+    (0..poly.len())
+        .map(|i| {
+            let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
+            a[0] * b[1] - b[0] * a[1]
+        })
+        .sum()
 }
 
 fn inside(p: P2, a: P2, b: P2, c: P2) -> bool {
@@ -35,10 +37,11 @@ pub fn triangulate(poly: &[P2]) -> Vec<[usize; 3]> {
         let ear = (0..m).find(|&k| {
             let (a, b, c) = (poly[idx[(k + m - 1) % m]], poly[idx[k]], poly[idx[(k + 1) % m]]);
             // convex corner with no other point of the polygon in it
-            cross(a, b, c) > 0.0 && !idx.iter().any(|&j| {
-                let p = poly[j];
-                p != a && p != b && p != c && inside(p, a, b, c)
-            })
+            cross(a, b, c) > 0.0
+                && !idx.iter().any(|&j| {
+                    let p = poly[j];
+                    p != a && p != b && p != c && inside(p, a, b, c)
+                })
         });
         // no ear (a degenerate or crossing polygon): cut any corner, so the count stays right
         let k = ear.unwrap_or(0);

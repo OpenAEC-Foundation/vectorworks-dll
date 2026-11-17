@@ -26,6 +26,8 @@ pub struct NurbsSurface {
     pub closed: [bool; 2],
     /// Points of the surface on a coarse grid, to start searches from: (u, v, point).
     samples: Vec<(f64, f64, P3)>,
+    /// The size of the surface: the diagonal of the box around those points.
+    size: f64,
 }
 
 /// The index of the first basis function that is not zero at `t`, and the values of the
@@ -78,9 +80,20 @@ impl NurbsSurface {
             }
             vertices = turned;
         }
-        let mut s = NurbsSurface { degree, count, dim, vertices, knots, closed, samples: Vec::new() };
+        let mut s = NurbsSurface { degree, count, dim, vertices, knots, closed, samples: Vec::new(), size: 0.0 };
         let (us, vs) = (s.parameters(0, 3), s.parameters(1, 3));
-        s.samples = us.iter().flat_map(|&u| vs.iter().map(move |&v| (u, v))).map(|(u, v)| (u, v, s.eval(u, v))).collect();
+        s.samples = us.iter().flat_map(|&u| vs.iter().map(move |&v| (u, v))).map(|(u, v)| (u, v, s.eval_inside(u, v))).collect();
+        let (mut lo, mut hi) = ([f64::MAX; 3], [f64::MIN; 3]);
+        for sample in &s.samples {
+            for k in 0..3 {
+                lo[k] = lo[k].min(sample.2[k]);
+                hi[k] = hi[k].max(sample.2[k]);
+            }
+        }
+        s.size = dist(lo, hi);
+        if !s.size.is_finite() {
+            return None;
+        }
         Some(s)
     }
 
@@ -89,7 +102,35 @@ impl NurbsSurface {
         (self.knots[axis][self.degree[axis]], self.knots[axis][self.count[axis]])
     }
 
+    /// The point at (u, v). Outside its range a surface goes on straight (faces may lie on
+    /// such an extension); a closed direction comes round again.
     pub fn eval(&self, u: f64, v: f64) -> P3 {
+        let inside = self.inside([u, v]);
+        let mut p = self.eval_inside(inside[0], inside[1]);
+        // how far beyond the end of an open direction
+        let beyond = [0, 1].map(|k| if self.closed[k] { 0.0 } else { [u, v][k] - inside[k] });
+        if beyond != [0.0, 0.0] {
+            let d = self.derivatives(inside[0], inside[1]);
+            for k in 0..3 {
+                p[k] += beyond[0] * d[0][k] + beyond[1] * d[1][k];
+            }
+        }
+        p
+    }
+
+    /// (u, v) brought into the range of the surface: wrapped in a closed direction, else limited.
+    fn inside(&self, uv: [f64; 2]) -> [f64; 2] {
+        [0, 1].map(|k| {
+            let (lo, hi) = self.range(k);
+            if self.closed[k] && hi > lo {
+                lo + (uv[k] - lo).rem_euclid(hi - lo)
+            } else {
+                uv[k].clamp(lo, hi)
+            }
+        })
+    }
+
+    fn eval_inside(&self, u: f64, v: f64) -> P3 {
         let (iu, nu) = basis(&self.knots[0], self.degree[0], self.count[0], u);
         let (iv, nv) = basis(&self.knots[1], self.degree[1], self.count[1], v);
         let mut sum = [0.0; 4];
@@ -108,10 +149,18 @@ impl NurbsSurface {
 
     /// The derivatives along u and along v at (u, v), by differences inside the range.
     fn derivatives(&self, u: f64, v: f64) -> [P3; 2] {
+        // outside the range the surface goes on as it left it
+        let [u, v] = self.inside([u, v]);
         let d = |axis: usize| {
             let (lo, hi) = self.range(axis);
             let h = (hi - lo) * 1e-6;
-            let at = |t: f64| if axis == 0 { self.eval(t, v) } else { self.eval(u, t) };
+            let at = |t: f64| {
+                if axis == 0 {
+                    self.eval_inside(t, v)
+                } else {
+                    self.eval_inside(u, t)
+                }
+            };
             let t = if axis == 0 { u } else { v };
             let (a, b) = ((t - h).max(lo), (t + h).min(hi));
             sub(at(b), at(a)).map(|c| c / (b - a))
@@ -125,12 +174,37 @@ impl NurbsSurface {
         unit(cross(du, dv))
     }
 
-    /// The parameters of the point of the surface nearest to `p`, searched from `guess`.
+    /// The parameters of the point of the surface nearest to `p`, searched from `guess`: on the
+    /// surface itself, and for a point that is not there on its extension as well.
     pub fn invert_near(&self, p: P3, guess: [f64; 2]) -> [f64; 2] {
-        let ranges = [self.range(0), self.range(1)];
-        let mut uv = guess;
+        let on = self.search(p, guess, 0.0);
+        if on.0 <= 1e-7 * self.size {
+            return on.1;
+        }
+        let beyond = self.search(p, on.1, 1.0);
+        if beyond.0 < on.0 {
+            beyond.1
+        } else {
+            on.1
+        }
+    }
+
+    /// The nearest point found from `guess`, as (distance, parameters). An open direction is
+    /// searched up to `reach` times its range beyond its ends; a closed one is followed round.
+    fn search(&self, p: P3, guess: [f64; 2], reach: f64) -> (f64, [f64; 2]) {
+        let limit = |uv: [f64; 2]| {
+            [0, 1].map(|k| {
+                let (lo, hi) = self.range(k);
+                if self.closed[k] {
+                    uv[k]
+                } else {
+                    uv[k].clamp(lo - (hi - lo) * reach, hi + (hi - lo) * reach)
+                }
+            })
+        };
+        let mut uv = limit(guess);
         let mut best = (dist(self.eval(uv[0], uv[1]), p), uv);
-        for _ in 0..24 {
+        for _ in 0..32 {
             let [du, dv] = self.derivatives(uv[0], uv[1]);
             let r = sub(p, self.eval(uv[0], uv[1]));
             // least squares: [du dv] step = r
@@ -146,21 +220,26 @@ impl NurbsSurface {
             } else {
                 break;
             };
-            for k in 0..2 {
-                uv[k] = (uv[k] + step[k]).clamp(ranges[k].0, ranges[k].1);
-            }
-            let d = dist(self.eval(uv[0], uv[1]), p);
-            if d < best.0 {
-                let gain = best.0 - d;
-                best = (d, uv);
-                if gain < 1e-13 {
+            // the whole step, or as much of it as brings the point nearer (near a pole, where
+            // one of the directions has no length, a whole step overshoots)
+            let mut gain = None;
+            let mut part = 1.0;
+            for _ in 0..10 {
+                let next = limit([uv[0] + step[0] * part, uv[1] + step[1] * part]);
+                let d = dist(self.eval(next[0], next[1]), p);
+                if d < best.0 {
+                    gain = Some(best.0 - d);
+                    best = (d, next);
+                    uv = next;
                     break;
                 }
-            } else {
+                part /= 2.0;
+            }
+            if !gain.is_some_and(|g| g > 1e-13) {
                 break;
             }
         }
-        best.1
+        best
     }
 
     /// The parameters of the point of the surface nearest to `p`.
@@ -264,6 +343,31 @@ pub(crate) mod tests {
             let [u2, v2] = s.invert(p);
             assert!(dist(s.eval(u2, v2), p) < 1e-9, "{u} {v} -> {u2} {v2}");
         }
+    }
+
+    #[test]
+    fn goes_on_straight_outside_its_range() {
+        // a flat patch from (0, 0) to (2, 1): a point beyond its corner is still found
+        let flat = NurbsSurface::new([1, 1], [2, 2], 3, vec![0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 2.0, 0.0, 0.0, 2.0, 1.0, 0.0], [vec![0.0, 0.0, 1.0, 1.0], vec![0.0, 0.0, 1.0, 1.0]], [false, false], false)
+            .unwrap();
+        assert_eq!(flat.eval(1.5, -0.5), [3.0, -0.5, 0.0]);
+        let [u, v] = flat.invert([3.0, -0.5, 0.0]);
+        assert!((u - 1.5).abs() < 1e-9 && (v + 0.5).abs() < 1e-9, "{u} {v}");
+    }
+
+    #[test]
+    fn a_closed_direction_comes_round_again() {
+        // a square tube about z: four straight sides in u, closed; straight along v
+        let corners = [[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0], [0.0, -1.0], [1.0, 0.0]];
+        let vertices: Vec<f64> = corners.iter().flat_map(|c| [[c[0], c[1], 0.0], [c[0], c[1], 1.0]]).flatten().collect();
+        let tube = NurbsSurface::new([1, 1], [5, 2], 3, vertices, [vec![0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 4.0], vec![0.0, 0.0, 1.0, 1.0]], [true, false], false).unwrap();
+        for (u, v) in [(0.5, 0.5), (3.25, 0.0)] {
+            assert!(dist(tube.eval(u - 4.0, v), tube.eval(u, v)) < 1e-12);
+            assert!(dist(tube.eval(u + 8.0, v), tube.eval(u, v)) < 1e-12);
+        }
+        // a search that starts on the other side of the seam goes across it
+        let [u, _] = tube.invert_near(tube.eval(3.9, 0.5), [0.1, 0.5]);
+        assert!((u + 0.1).abs() < 1e-9, "{u}");
     }
 
     #[test]

@@ -9,15 +9,18 @@
 //!   close in (u, v); two such loops bound a band, one of them a cap up to the pole or apex.
 //!   The triangulation is a constrained Delaunay one, so the boundary stays as the curves gave
 //!   it and neighbouring faces share their points;
-//! - a face of any **other surface** (B-surface, swept, spun, blend, offset) is not evaluated
-//!   yet: its loops are filled as if they lay in one plane, and counted as approximate.
+//! - a face of a **B-surface**, a **swept** or a **spun surface** likewise, with its parameters
+//!   searched from point to point along each loop;
+//! - a face of any **other surface** (blend, offset) is not evaluated yet: its loops are filled
+//!   as if they lay in one plane, and counted as approximate. So is a face whose loops could
+//!   not be laid out in the parameters of its surface, with the reason.
 //!
 //! The loop direction has the face on its left seen from outside, so the outer loop of a face
 //! runs counter-clockwise about the face normal.
 
 use std::f64::consts::TAU;
 
-use crate::curve::{self, ARC_STEP};
+use crate::curve;
 use crate::geom::{add, cross, dot, len, mul, sub, unit, P2, P3};
 use crate::parse::{File, Node};
 use crate::surface::{face_sign, Surface};
@@ -46,6 +49,8 @@ pub struct Mesh {
     /// The node type of the surface of each face counted in `approximate` (0: no surface), and
     /// why it was not triangulated on its surface.
     pub approximate_surfaces: Vec<(u16, &'static str)>,
+    /// Per face: its first triangle and the node type of its surface (0: none).
+    pub face_starts: Vec<(usize, u16)>,
 }
 
 /// The triangles of every face in `file`.
@@ -54,6 +59,7 @@ pub fn tessellate(file: &File) -> Mesh {
     for (_, face) in file.of_type(code::FACE) {
         mesh.faces += 1;
         let before = mesh.triangles.len();
+        mesh.face_starts.push((before, file.node(face.ptr("surface")).map_or(0, Node::code)));
         let loops = face_loops(file, face, &mut mesh.straight_edges);
         match Surface::load(file, face.ptr("surface")) {
             Some(s) if s.kind == surface::Kind::Plane => {
@@ -172,7 +178,9 @@ fn area2(p: &[P2]) -> f64 {
 /// Fills loops that lie in one plane: the largest is the outside, the others are holes.
 /// `normal` is the face normal; without it the direction of the outer loop gives it.
 fn flat(mesh: &mut Mesh, loops: &[Vec<P3>], normal: Option<P3>) {
-    let Some(outer) = (0..loops.len()).max_by(|&a, &b| len(newell(&loops[a])).total_cmp(&len(newell(&loops[b])))) else { return };
+    let Some(outer) = (0..loops.len()).max_by(|&a, &b| len(newell(&loops[a])).total_cmp(&len(newell(&loops[b])))) else {
+        return;
+    };
     let around = newell(&loops[outer]);
     let normal = unit(normal.unwrap_or(around));
     if len(normal) == 0.0 {
@@ -199,7 +207,9 @@ fn flat(mesh: &mut Mesh, loops: &[Vec<P3>], normal: Option<P3>) {
     if coords.iter().any(|c: &f64| !c.is_finite()) {
         return;
     }
-    let Ok(indices) = earcutr::earcut(&coords, &holes, 2) else { return };
+    let Ok(indices) = earcutr::earcut(&coords, &holes, 2) else {
+        return;
+    };
     let base = mesh.positions.len() as u32;
     mesh.positions.extend(&points);
     mesh.normals.extend(std::iter::repeat_n(normal, points.len()));
@@ -246,28 +256,61 @@ fn wrap(delta: f64, period: f64) -> f64 {
     delta - period * (delta / period).round()
 }
 
+/// The parameters of the points of a loop on `s`. On a B-surface a point is searched from its
+/// neighbour, which keeps a loop on one side of a seam; a search that ends away from the point
+/// is done again over the whole surface; and a second pass, backwards, moves points to the side
+/// their other neighbour is on (the first points of a loop that starts on a seam).
+fn follow(s: &Surface, points: &[P3]) -> Vec<P2> {
+    if !s.searched() {
+        return points.iter().map(|p| s.invert(*p)).collect();
+    }
+    let miss = |p: P3, uv: P2| crate::geom::dist(s.eval(uv[0], uv[1]), p);
+    let size = points.iter().map(|p| crate::geom::dist(*p, points[0])).fold(0.0, f64::max);
+    let tolerance = 1e-6 * size.max(1e-9);
+    let mut uv: Vec<P2> = Vec::with_capacity(points.len());
+    for p in points {
+        let mut found = match uv.last() {
+            Some(last) => s.invert_near(*p, *last),
+            None => s.invert(*p),
+        };
+        if miss(*p, found) > tolerance {
+            let again = s.invert(*p);
+            if miss(*p, again) < miss(*p, found) {
+                found = again;
+            }
+        }
+        uv.push(found);
+    }
+    let n = uv.len();
+    let step = s.step();
+    let apart = |a: P2, b: P2| ((a[0] - b[0]) / step[0]).abs() + ((a[1] - b[1]) / step[1]).abs();
+    for i in (0..n).rev() {
+        let (next, previous) = (uv[(i + 1) % n], uv[(i + n - 1) % n]);
+        let other = s.invert_near(points[i], next);
+        if miss(points[i], other) <= miss(points[i], uv[i]) + tolerance && apart(other, next) + apart(other, previous) < apart(uv[i], next) + apart(uv[i], previous) {
+            uv[i] = other;
+        }
+    }
+    uv
+}
+
 /// A loop in the parameters of `s`, `u` (and `v` on a torus) continuous along it, and how many
 /// times it goes around in `u` and in `v`.
 fn unwrap(s: &Surface, points: &[P3]) -> (Vec<P2>, i32, i32) {
-    // each point searched from the one before it (a B-surface is searched, not solved)
-    let mut uv: Vec<P2> = Vec::with_capacity(points.len());
-    for p in points {
-        uv.push(match uv.last() {
-            Some(last) => s.invert_near(*p, *last),
-            None => s.invert(*p),
-        });
-    }
+    let uv = follow(s, points);
+    let mut uv = uv;
     let singular: Vec<bool> = points.iter().map(|p| s.singular(*p)).collect();
-    // at a pole or apex u is that of a neighbour
+    // at a pole or apex the angle about the axis is that of a neighbour
+    let angular = s.angular();
     if let Some(first) = singular.iter().position(|x| !x) {
         let n = uv.len();
-        let mut last = uv[first][0];
+        let mut last = uv[first][angular];
         for k in 0..n {
             let i = (first + k) % n;
             if singular[i] {
-                uv[i][0] = last;
+                uv[i][angular] = last;
             } else {
-                last = uv[i][0];
+                last = uv[i][angular];
             }
         }
     }
@@ -329,13 +372,11 @@ fn curved(mesh: &mut Mesh, loops: &[Vec<P3>], s: &Surface, sign: f64) -> Result<
         },
         1 => {
             let (ring, turns) = around.pop().unwrap();
-            if swap {
-                return Err("one loop around in v");
-            }
             // the face is left of the loop seen from outside: towards larger v when the loop
-            // runs towards larger u and the face normal is the natural normal
-            let up = (turns > 0) == (sign > 0.0);
-            match cap(s, ring, turns, up, period) {
+            // runs towards larger u and the face normal is the natural normal; and towards
+            // smaller u when it runs towards larger v
+            let up = ((turns > 0) == (sign > 0.0)) != swap;
+            match cap(s, ring, turns, up, period, swap) {
                 Some(ring) => ring,
                 None => return Err("one loop around the axis and no pole on that side"),
             }
@@ -371,11 +412,13 @@ fn close_around(ring: &mut Ring, turns: i32, period: f64) {
     ring.push([first.uv[0] + turns as f64 * period, first.uv[1]], first.exact);
 }
 
-fn cap(s: &Surface, mut ring: Ring, turns: i32, up: bool, period: f64) -> Option<Ring> {
-    let pole = s.pole(up)?;
+/// A loop around the axis made into a ring by going back along the pole or apex on its `up`
+/// side. The ring is in (u, v), or with `swap` in (v, u).
+fn cap(s: &Surface, mut ring: Ring, turns: i32, up: bool, period: f64, swap: bool) -> Option<Ring> {
+    let pole = s.pole(usize::from(!swap), up)?;
     close_around(&mut ring, turns, period);
     let (from, to) = (ring.corners[ring.corners.len() - 1].uv[0], ring.corners[0].uv[0]);
-    let steps = ((from - to).abs() / ARC_STEP).ceil().max(1.0) as usize;
+    let steps = (((from - to).abs() / s.step()[usize::from(swap)]).ceil().max(1.0) as usize).min(512);
     for k in 0..=steps {
         ring.push([from + (to - from) * k as f64 / steps as f64, pole], None);
     }
@@ -462,7 +505,8 @@ fn triangulate(mesh: &mut Mesh, rings: &[Ring], s: &Surface, sign: f64, swap: bo
     let mean_v = rings.iter().flat_map(|r| &r.corners).map(|c| uv_of(c.uv)[1]).sum::<f64>() / count as f64;
     let scale = s.scale(mean_v).map(|k| k.max(1e-12));
     let scale = uv_of(scale);
-    let flat = |uv: P2| [uv[0] * scale[0], uv[1] * scale[1]];
+    // (the triangulation takes no numbers that are next to nothing: such a one is 0)
+    let flat = |uv: P2| [uv[0] * scale[0], uv[1] * scale[1]].map(|c| if c.abs() < 1e-30 { 0.0 } else { c });
     let outlines: Vec<Vec<P2>> = rings.iter().map(|r| r.corners.iter().map(|c| flat(c.uv)).collect()).collect();
     let mut cdt = ConstrainedDelaunayTriangulation::<Point2<f64>>::new();
     // the corner of each vertex of the triangulation
@@ -522,7 +566,15 @@ fn triangulate(mesh: &mut Mesh, rings: &[Ring], s: &Surface, sign: f64, swap: bo
     for face in cdt.inner_faces() {
         let v = face.vertices();
         let t = [v[0].fix().index(), v[1].fix().index(), v[2].fix().index()];
-        let centre = [0, 1].map(|k| (v[0].position().x * (1 - k) as f64 + v[0].position().y * k as f64 + v[1].position().x * (1 - k) as f64 + v[1].position().y * k as f64 + v[2].position().x * (1 - k) as f64 + v[2].position().y * k as f64) / 3.0);
+        let centre = [0, 1].map(|k| {
+            (v[0].position().x * (1 - k) as f64
+                + v[0].position().y * k as f64
+                + v[1].position().x * (1 - k) as f64
+                + v[1].position().y * k as f64
+                + v[2].position().x * (1 - k) as f64
+                + v[2].position().y * k as f64)
+                / 3.0
+        });
         if !inside(&outlines, centre) {
             continue;
         }
@@ -554,7 +606,7 @@ mod tests {
     }
 
     fn upright(kind: Kind) -> Surface {
-        Surface { kind, frame: Frame::new([0.0; 3], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]), positive: true, nurbs: None }
+        Surface { kind, frame: Frame::new([0.0; 3], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]), positive: true, nurbs: None, profile: None }
     }
 
     fn area(mesh: &Mesh) -> f64 {
@@ -637,7 +689,7 @@ mod tests {
     fn face_on_a_b_surface_follows_the_surface() {
         // the quarter cylinder (radius 1, height 2), bounded by its own four edges
         let n = std::rc::Rc::new(crate::nurbs::tests::quarter_cylinder());
-        let s = Surface { kind: Kind::Nurbs, frame: Frame::new([0.0; 3], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]), positive: true, nurbs: Some(n.clone()) };
+        let s = Surface { kind: Kind::Nurbs, frame: Frame::new([0.0; 3], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]), positive: true, nurbs: Some(n.clone()), profile: None };
         let mut ring = Vec::new();
         for k in 0..8 {
             ring.push(n.eval(k as f64 / 8.0, 0.0));
@@ -696,16 +748,17 @@ mod tests {
 
     #[test]
     fn cone_from_its_base_circle_to_the_apex() {
-        // radius 1 at v = 0, narrowing towards +z: R = P - vA + radial (r + v tan a), tan = 1,
-        // so the apex is at v = -1, which is z = +1
+        // radius 1 at v = 0, widening towards +z: R = P + vA + radial (r + v tan a), tan = 1,
+        // so the apex is at v = -1, which is z = -1
         let s = upright(Kind::Cone { radius: 1.0, tan: 1.0 });
         let mut mesh = Mesh::default();
-        // natural normal of a cone points inward; a face seen from outside has the other sign
-        assert_eq!(curved(&mut mesh, &[circle(0.0, 1.0, false)], &s, -1.0), Ok(()));
-        assert!(mesh.positions.iter().any(|p| dist(*p, [0.0, 0.0, 1.0]) < 1e-9));
+        // the natural normal of a cone points outward; the face is below its circle, which
+        // then runs clockwise seen from above
+        assert_eq!(curved(&mut mesh, &[circle(0.0, 1.0, true)], &s, 1.0), Ok(()));
+        assert!(mesh.positions.iter().any(|p| dist(*p, [0.0, 0.0, -1.0]) < 1e-9));
         // lateral area pi r l = pi sqrt(2)
         assert!((area(&mesh) / (TAU / 2.0 * 2f64.sqrt()) - 1.0).abs() < 0.04, "{}", area(&mesh));
-        // away from the axis and upwards along the slope
-        assert!(consistent(&mesh, |p| [p[0], p[1], p[0].hypot(p[1])]));
+        // away from the axis and downwards along the slope
+        assert!(consistent(&mesh, |p| [p[0], p[1], -p[0].hypot(p[1])]));
     }
 }

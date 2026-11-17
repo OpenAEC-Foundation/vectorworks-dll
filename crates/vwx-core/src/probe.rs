@@ -78,15 +78,7 @@ impl Probe {
             container: Container::of(data),
             header: crate::Header::parse(data),
             stream_bytes: streams.iter().map(|s| s.compressed).sum(),
-            streams: streams
-                .iter()
-                .map(|s| StreamInfo {
-                    offset: s.offset,
-                    compressed: s.compressed,
-                    inflated: s.data.len(),
-                    head: crate::hex::bytes(&s.data[..s.data.len().min(32)]),
-                })
-                .collect(),
+            streams: streams.iter().map(|s| StreamInfo { offset: s.offset, compressed: s.compressed, inflated: s.data.len(), head: crate::hex::bytes(&s.data[..s.data.len().min(32)]) }).collect(),
             strings_ascii: count(Encoding::Ascii),
             strings_utf16le: count(Encoding::Utf16le),
             strings_utf16be: count(Encoding::Utf16be),

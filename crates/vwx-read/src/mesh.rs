@@ -225,8 +225,12 @@ impl Builder<'_, '_> {
             }
             kind::SOLID => {
                 // a sphere, hemisphere or cone: the mesh Vectorworks keeps for it
-                let Some(&child) = raw.children[i].iter().find(|&&c| raw.records[c].kind() == kind::POLY_MESH) else { return };
-                let Some((points, faces)) = shapes::poly_mesh(&raw.records[child]) else { return };
+                let Some(&child) = raw.children[i].iter().find(|&&c| raw.records[c].kind() == kind::POLY_MESH) else {
+                    return;
+                };
+                let Some((points, faces)) = shapes::poly_mesh(&raw.records[child]) else {
+                    return;
+                };
                 for face in faces {
                     let corners: Vec<P3> = face.iter().map(|&k| place.apply(points[k])).collect();
                     self.face(key, &corners, color, place.mirrors());
@@ -237,14 +241,18 @@ impl Builder<'_, '_> {
                     return;
                 }
                 // one ring per profile, in the object's own coordinates
-                let (Some(rings), Some((placement, _))) = (self.grid_of(i), shapes::solid_frame(r)) else { return };
+                let (Some(rings), Some((placement, _))) = (self.grid_of(i), shapes::solid_frame(r)) else {
+                    return;
+                };
                 self.loft(key, &rings, &placement.then(place), color, false, true);
             }
             kind::SWEEP => {
                 if self.body(i, place, key, color, false) {
                     return;
                 }
-                let Some(sweep) = shapes::sweep(r) else { return };
+                let Some(sweep) = shapes::sweep(r) else {
+                    return;
+                };
                 let place = sweep.placement.then(place);
                 for &c in &raw.children[i] {
                     // the rings Vectorworks keeps for the profile, else the profile turned here
@@ -272,7 +280,9 @@ impl Builder<'_, '_> {
                 }
             }
             kind::MESH => {
-                let Some(points) = shapes::mesh_points(r) else { return };
+                let Some(points) = shapes::mesh_points(r) else {
+                    return;
+                };
                 for &c in &raw.children[i] {
                     let face = &raw.records[c];
                     if face.kind() != kind::MESH_FACE {
@@ -296,8 +306,12 @@ impl Builder<'_, '_> {
                 }
             }
             kind::SYMBOL => {
-                let Some(instance) = shapes::instance(r) else { return };
-                let Some(&definition) = raw.by_ref.get(&instance.definition) else { return };
+                let Some(instance) = shapes::instance(r) else {
+                    return;
+                };
+                let Some(&definition) = raw.by_ref.get(&instance.definition) else {
+                    return;
+                };
                 if depth >= MAX_DEPTH || raw.records[definition].kind() != kind::SYMBOL_DEFINITION {
                     return;
                 }
@@ -324,8 +338,12 @@ impl Builder<'_, '_> {
     /// false a body with faces that are not evaluated yet is left out. True when drawn.
     fn body(&mut self, i: usize, place: &Affine, key: (usize, u32), color: [u8; 3], approximate: bool) -> bool {
         let raw = self.raw;
-        let Some(&child) = raw.children[i].iter().find(|&&c| raw.records[c].kind() == kind::BODY) else { return false };
-        let Some(body) = shapes::body(&raw.records[child]) else { return false };
+        let Some(&child) = raw.children[i].iter().find(|&&c| raw.records[c].kind() == kind::BODY) else {
+            return false;
+        };
+        let Some(body) = shapes::body(&raw.records[child]) else {
+            return false;
+        };
         if !approximate && body.approximate > 0 {
             return false;
         }
@@ -382,7 +400,9 @@ impl Builder<'_, '_> {
         let world: Vec<Vec<P3>> = rings.iter().map(|ring| ring.iter().map(|p| place.apply(*p)).collect()).collect();
         // which way the profile turns, seen along the way the rings go: decides which side of
         // the faces is the outside
-        let Some(normal) = newell(&world[0]) else { return };
+        let Some(normal) = newell(&world[0]) else {
+            return;
+        };
         let forward: f64 = (0..n).map(|k| (0..3).map(|a| (world[1][k][a] - world[0][k][a]) * normal[a]).sum::<f64>()).sum();
         let outward = forward >= 0.0;
         let pairs = rings.len() - usize::from(!closed);
@@ -431,7 +451,9 @@ impl Builder<'_, '_> {
 
     /// One flat face from its corners in order (millimetres); `flip` turns it over.
     fn face(&mut self, key: (usize, u32), corners: &[P3], color: [u8; 3], flip: bool) {
-        let Some(normal) = newell(corners) else { return };
+        let Some(normal) = newell(corners) else {
+            return;
+        };
         // the triangles are found in the plane of the face: drop the axis the normal is closest to
         let drop = (0..3).max_by(|&a, &b| normal[a].abs().total_cmp(&normal[b].abs())).unwrap_or(2);
         let (u, v) = ((drop + 1) % 3, (drop + 2) % 3);

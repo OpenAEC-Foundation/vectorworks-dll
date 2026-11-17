@@ -331,7 +331,9 @@ pub fn parse(data: &[u8]) -> Result<File> {
             r.i16()?;
             break;
         }
-        let Ok(code) = u16::try_from(code) else { return r.fail(format!("node type {code}")) };
+        let Ok(code) = u16::try_from(code) else {
+            return r.fail(format!("node type {code}"));
+        };
         let def = match defs.get(&code) {
             Some(d) => d.clone(),
             None => {

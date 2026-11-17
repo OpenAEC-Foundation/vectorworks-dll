@@ -14,7 +14,7 @@ use std::f64::consts::TAU;
 
 use crate::geom::{add, dist, mul, sub, Frame, P3};
 use crate::parse::{File, Node, Value};
-use crate::surface::Surface;
+use crate::surface::{Kind, Surface};
 
 /// Largest angle between two points on a circle.
 pub const ARC_STEP: f64 = TAU / 32.0;
@@ -80,16 +80,19 @@ fn vector(v: &Value) -> Option<P3> {
     }
 }
 
-/// Points on a circle or an ellipse `C + a X cos t + b Y sin t`.
-fn conic(n: &Node, from: Option<P3>, to: Option<P3>, increasing: bool) -> Option<Vec<P3>> {
+/// The frame and the two radii of a circle or an ellipse `C + a X cos t + b Y sin t`.
+fn conic_shape(n: &Node) -> Option<(Frame, f64, f64)> {
     let frame = Frame::new(n.vector("centre")?, n.vector("normal")?, n.vector("x_axis")?);
     let (a, b) = match n.real("radius") {
         Some(r) => (r, r),
         None => (n.real("major_radius")?, n.real("minor_radius")?),
     };
-    if !(a.is_finite() && b.is_finite()) || a == 0.0 || b == 0.0 {
-        return None;
-    }
+    (a.is_finite() && b.is_finite() && a != 0.0 && b != 0.0).then_some((frame, a, b))
+}
+
+/// Points on a circle or an ellipse.
+fn conic(n: &Node, from: Option<P3>, to: Option<P3>, increasing: bool) -> Option<Vec<P3>> {
+    let (frame, a, b) = conic_shape(n)?;
     let angle = |p: P3| {
         let l = frame.local(p);
         (l[1] / b).atan2(l[0] / a)
@@ -138,7 +141,13 @@ fn along(points: &[P3], from: Option<P3>, to: Option<P3>, increasing: bool) -> V
         return out;
     }
     let increasing = if closed { increasing } else { a < b };
-    let step = |k: usize| if increasing { (k + 1) % n } else { (k + n - 1) % n };
+    let step = |k: usize| {
+        if increasing {
+            (k + 1) % n
+        } else {
+            (k + n - 1) % n
+        }
+    };
     let mut k = step(a.min(n - 1));
     let end = b.min(n - 1);
     let mut guard = 0;
@@ -153,7 +162,80 @@ fn along(points: &[P3], from: Option<P3>, to: Option<P3>, increasing: bool) -> V
     out
 }
 
+/// A curve by its parameter, as the surfaces made from a curve use it: a swept surface its
+/// section, a spun surface its profile. The parametrisations are those of the reference
+/// (E.5.2.1): a line `P + tD`, a circle or ellipse `C + a X cos t + b Y sin t`, a B-curve its
+/// own. The `sense` of the curve node plays no part: the parameter is the natural one.
+#[derive(Debug, Clone)]
+pub enum Path {
+    Line { point: P3, direction: P3 },
+    Conic { frame: Frame, a: f64, b: f64 },
+    Spline(Nurbs),
+}
+
+impl Path {
+    /// The curve of node `curve`; `None` for the kinds that have no parameter here.
+    pub fn load(file: &File, curve: u32) -> Option<Path> {
+        let mut n = file.node(curve)?;
+        for _ in 0..8 {
+            if n.code() != TRIMMED_CURVE {
+                break;
+            }
+            n = file.node(n.ptr("basis_curve"))?;
+        }
+        match n.code() {
+            LINE => {
+                let (point, direction) = (n.vector("pvec")?, n.vector("direction")?);
+                (crate::geom::len(direction) > 0.0).then_some(Path::Line { point, direction })
+            }
+            CIRCLE | ELLIPSE => conic_shape(n).map(|(frame, a, b)| Path::Conic { frame, a, b }),
+            B_CURVE => {
+                let nurbs = Nurbs::curve(file, file.node(n.ptr("nurbs"))?)?;
+                (nurbs.dim == 3 + usize::from(nurbs.rational) && nurbs.range().is_some_and(|(lo, hi)| hi > lo)).then_some(Path::Spline(nurbs))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn eval(&self, t: f64) -> P3 {
+        match self {
+            Path::Line { point, direction } => add(*point, mul(*direction, t)),
+            Path::Conic { frame, a, b } => frame.world([a * t.cos(), b * t.sin(), 0.0]),
+            Path::Spline(nurbs) => {
+                let p = nurbs.eval(t);
+                [p[0], p[1], p[2]]
+            }
+        }
+    }
+
+    /// The parameters the curve is defined between; a line has no ends.
+    pub fn range(&self) -> Option<(f64, f64)> {
+        match self {
+            Path::Line { .. } => None,
+            Path::Conic { .. } => Some((0.0, TAU)),
+            Path::Spline(nurbs) => nurbs.range(),
+        }
+    }
+
+    /// The period of a curve that closes on itself.
+    pub fn period(&self) -> Option<f64> {
+        let (lo, hi) = self.range()?;
+        let (a, b, mid) = (self.eval(lo), self.eval(hi), self.eval((lo + hi) / 2.0));
+        (dist(a, b) < 1e-9 * (1.0 + dist(a, mid))).then_some(hi - lo)
+    }
+
+    /// Parameters to draw and search the curve with; a line is known by any two.
+    pub fn parameters(&self) -> Vec<f64> {
+        match self {
+            Path::Line { .. } => vec![0.0, 1.0],
+            Path::Conic { .. } => (0..=32).map(|k| ARC_STEP * k as f64).collect(),
+            Path::Spline(nurbs) => nurbs.parameters(),
+        }
+    }
+}
+
 /// A B-spline (NURBS) curve as the reference stores it.
+#[derive(Debug, Clone)]
 pub struct Nurbs {
     pub degree: usize,
     pub dim: usize,
@@ -168,9 +250,7 @@ pub struct Nurbs {
 impl Nurbs {
     /// The curve of a `NURBS_CURVE` node.
     pub fn curve(file: &File, nurbs: &Node) -> Option<Nurbs> {
-        let reals = |n: u32, field: &str| -> Option<Vec<f64>> {
-            Some(file.node(n)?.many(field).iter().filter_map(|v| if let Value::Real(r) = v { Some(*r) } else { None }).collect())
-        };
+        let reals = |n: u32, field: &str| -> Option<Vec<f64>> { Some(file.node(n)?.many(field).iter().filter_map(|v| if let Value::Real(r) = v { Some(*r) } else { None }).collect()) };
         let mult: Vec<i64> = file.node(nurbs.ptr("knot_mult"))?.many("mult").iter().filter_map(|v| if let Value::Int(i) = v { Some(*i) } else { None }).collect();
         let distinct = reals(nurbs.ptr("knots"), "knots")?;
         let knots = distinct.iter().zip(&mult).flat_map(|(k, m)| std::iter::repeat_n(*k, (*m).max(0) as usize)).collect();
@@ -223,7 +303,9 @@ impl Nurbs {
 
     /// Parameters to draw the curve with: the knots of its range and steps between them.
     pub fn parameters(&self) -> Vec<f64> {
-        let Some((lo, hi)) = self.range() else { return Vec::new() };
+        let Some((lo, hi)) = self.range() else {
+            return Vec::new();
+        };
         let steps = if self.degree <= 1 { 1 } else { SPAN_STEPS };
         let mut breaks: Vec<f64> = self.knots.iter().copied().filter(|k| *k >= lo && *k <= hi).collect();
         breaks.dedup();
@@ -250,10 +332,29 @@ fn bspline_points(file: &File, b_curve: &Node) -> Option<Vec<P3>> {
 fn surface_curve_points(file: &File, sp_curve: &Node) -> Option<Vec<P3>> {
     let surface = Surface::load(file, sp_curve.ptr("surface"))?;
     let nurbs = Nurbs::curve(file, file.node(file.node(sp_curve.ptr("b_curve"))?.ptr("nurbs"))?)?;
-    if nurbs.dim - usize::from(nurbs.rational) != 2 {
+    if nurbs.dim != 2 + usize::from(nurbs.rational) {
         return None;
     }
-    Some(nurbs.parameters().into_iter().map(|t| nurbs.eval(t)).map(|uv| surface.eval(uv[0], uv[1])).collect())
+    // what is straight in (u, v) bends with the surface: no step wider than the surface is
+    // drawn with
+    let step = surface.step();
+    let bends = [surface.kind != Kind::Plane, surface.curved_in_v()];
+    let mut out: Vec<P3> = Vec::new();
+    let mut last: Option<(f64, Vec<f64>)> = None;
+    for t in nurbs.parameters() {
+        let uv = nurbs.eval(t);
+        if let Some((t0, uv0)) = &last {
+            let wide = (0..2).filter(|k| bends[*k]).map(|k| ((uv[k] - uv0[k]) / step[k]).abs()).fold(0.0, f64::max);
+            let parts = if wide.is_finite() { (wide.ceil() as usize).clamp(1, 256) } else { 1 };
+            for k in 1..parts {
+                let uv = nurbs.eval(t0 + (t - t0) * k as f64 / parts as f64);
+                out.push(surface.eval(uv[0], uv[1]));
+            }
+        }
+        out.push(surface.eval(uv[0], uv[1]));
+        last = Some((t, uv));
+    }
+    Some(out)
 }
 
 /// A point between two others, for callers that step along straight edges.
@@ -278,6 +379,17 @@ mod tests {
         assert_eq!(n.eval(0.0), [1.0, 0.0, 0.0]);
         let end = n.eval(1.0);
         assert!(end[0].abs() < 1e-12 && (end[1] - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn paths_by_their_parameter() {
+        let line = Path::Line { point: [1.0, 0.0, 0.0], direction: [0.0, 2.0, 0.0] };
+        assert_eq!(line.eval(1.5), [1.0, 3.0, 0.0]);
+        assert_eq!((line.range(), line.period()), (None, None));
+        let ellipse = Path::Conic { frame: Frame::new([0.0; 3], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]), a: 2.0, b: 1.0 };
+        assert!(dist(ellipse.eval(TAU / 4.0), [0.0, 1.0, 0.0]) < 1e-12);
+        assert_eq!(ellipse.period(), Some(TAU));
+        assert_eq!(ellipse.parameters().len(), 33);
     }
 
     #[test]

@@ -77,7 +77,9 @@ pub unsafe extern "C" fn vwx_open(path: *const c_char) -> *mut VwxDocument {
     if path.is_null() {
         return std::ptr::null_mut();
     }
-    let Ok(path) = CStr::from_ptr(path).to_str() else { return std::ptr::null_mut() };
+    let Ok(path) = CStr::from_ptr(path).to_str() else {
+        return std::ptr::null_mut();
+    };
     match std::fs::read(path) {
         Ok(data) => Box::into_raw(Box::new(VwxDocument::new(data))),
         Err(_) => std::ptr::null_mut(),

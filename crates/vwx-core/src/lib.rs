@@ -12,9 +12,9 @@
 //!   that differ in one thing only (see `docs/ORACLE.md`);
 //! - [`hex`]: hex dumps.
 
-mod error;
 pub mod container;
 pub mod diff;
+mod error;
 pub mod header;
 pub mod hex;
 pub mod probe;
