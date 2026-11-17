@@ -575,16 +575,16 @@ impl Builder<'_, '_> {
                     // a shape with a fill is a face, one without is its outline
                     if shapes::filled(r, class) {
                         self.face(key, &world, color, place.mirrors());
-                    } else {
+                    } else if shapes::stroked(r, class) {
                         self.stroke(key, &world, pen, shapes::closed(r));
                     }
-                } else if let Some(points) = (r.kind() == kind::ARC).then(|| shapes::arc(r)).flatten() {
+                } else if let Some(points) = (r.kind() == kind::ARC && shapes::stroked(r, class)).then(|| shapes::arc(r)).flatten() {
                     let world: Vec<P3> = points.iter().map(|p| place.apply([p[0], p[1], z])).collect();
                     self.stroke(key, &world, pen, false);
                 }
             }
             kind::LINE => {
-                if nested {
+                if nested || !shapes::stroked(r, class) {
                     return;
                 }
                 if let Some([a, b]) = shapes::line(r) {
@@ -820,6 +820,12 @@ mod tests {
     use vwx_core::container::{Unpacked, RECORD_HEADER};
     use vwx_core::Header;
 
+    /// A drawn object with a solid pen.
+    fn pen(mut r: Vec<u8>) -> Vec<u8> {
+        r[0x50] = 2;
+        r
+    }
+
     /// Sets the parent address (0x26) and the reference and class numbers of a record.
     fn tagged(mut r: Vec<u8>, parent: u64, reference: u32, class: u32) -> Vec<u8> {
         r[0x26..0x2e].copy_from_slice(&parent.to_le_bytes());
@@ -863,7 +869,7 @@ mod tests {
     /// The box of sample 20: Rect(0, 500, 1000, 0) extruded 0..3000.
     fn box_records(parent: u64, own: u64) -> Vec<Vec<u8>> {
         let extrude = record(kind::EXTRUDE, 324, &[(0xcc, 1.0), (0xec, 1.0), (0x10c, 1.0), (0x138, 3000.0)]);
-        let rect = record(kind::RECTANGLE, 188, &[(0xa4, 1.0), (0xac, 1000.0), (0xb4, 500.0)]);
+        let rect = pen(record(kind::RECTANGLE, 188, &[(0xa4, 1.0), (0xac, 1000.0), (0xb4, 500.0)]));
         vec![tagged(extrude, parent, 0, 27), tagged(rect, own, 0, 0), tagged(record(kind::END, 88, &[]), own, 0, 0)]
     }
 
@@ -953,7 +959,7 @@ mod tests {
     #[test]
     fn records_of_an_object_are_among_its_properties() {
         // a rectangle with the record of sample 90 attached: format 41, "Gegevens", field "Naam"
-        let rect = record(kind::RECTANGLE, 188, &[(0xa4, 1.0), (0xac, 1000.0), (0xb4, 500.0)]);
+        let rect = pen(record(kind::RECTANGLE, 188, &[(0xa4, 1.0), (0xac, 1000.0), (0xb4, 500.0)]));
         let records = vec![
             tagged(names(&[(41, "Gegevens")]), 1, 0, 0),
             tagged(crate::records::tests::format_record(&[("Naam", 4, 0)]), 1, 41, 0),
@@ -997,9 +1003,9 @@ mod tests {
         for (visibility, hidden) in [(0xffu8, true), (2, false), (0, false)] {
             let mut class = record(kind::CLASS, 188, &[]);
             class[0xb6] = visibility;
-            let rect = record(kind::RECTANGLE, 188, &[(0xa4, 1.0), (0xac, 1000.0), (0xb4, 500.0)]);
+            let rect = pen(record(kind::RECTANGLE, 188, &[(0xa4, 1.0), (0xac, 1000.0), (0xb4, 500.0)]));
             // and a rectangle in no class beside it
-            let plain = record(kind::RECTANGLE, 188, &[(0xa4, 1.0), (0xac, 1000.0), (0xb4, 500.0)]);
+            let plain = pen(record(kind::RECTANGLE, 188, &[(0xa4, 1.0), (0xac, 1000.0), (0xb4, 500.0)]));
             let records = vec![tagged(class, 1, 7, 0), tagged(layer("L", 0.0), 1, 1, 0), tagged(rect, 2, 0, 7), tagged(plain, 2, 0, 0), tagged(record(kind::END, 88, &[]), 2, 0, 0)];
             let u = unpacked(records);
             let raw = Raw::new(&u).unwrap();
@@ -1009,7 +1015,7 @@ mod tests {
         // with nothing else to see, what is in an invisible class shows
         let mut class = record(kind::CLASS, 188, &[]);
         class[0xb6] = 0xff;
-        let rect = record(kind::RECTANGLE, 188, &[(0xa4, 1.0), (0xac, 1000.0), (0xb4, 500.0)]);
+        let rect = pen(record(kind::RECTANGLE, 188, &[(0xa4, 1.0), (0xac, 1000.0), (0xb4, 500.0)]));
         let records = vec![tagged(class, 1, 7, 0), tagged(layer("L", 0.0), 1, 1, 0), tagged(rect, 2, 0, 7), tagged(record(kind::END, 88, &[]), 2, 0, 0)];
         let u = unpacked(records);
         let scene = scene(&Raw::new(&u).unwrap(), Info::default());
@@ -1019,8 +1025,8 @@ mod tests {
     #[test]
     fn lines_and_shapes_without_a_fill_are_line_work() {
         // a line from (0, 0) to (1000, 0) and a rectangle without a fill, on a layer at 3000
-        let line = record(kind::LINE, 140, &[(0x80, 1000.0)]);
-        let rect = record(kind::RECTANGLE, 188, &[(0xa4, 1.0), (0xac, 1000.0), (0xb4, 500.0)]);
+        let line = pen(record(kind::LINE, 140, &[(0x80, 1000.0)]));
+        let rect = pen(record(kind::RECTANGLE, 188, &[(0xa4, 1.0), (0xac, 1000.0), (0xb4, 500.0)]));
         let records = vec![tagged(layer("L", 3000.0), 1, 1, 0), tagged(line, 2, 0, 0), tagged(rect, 2, 0, 0), tagged(record(kind::END, 88, &[]), 2, 0, 0)];
         let u = unpacked(records);
         let scene = scene(&Raw::new(&u).unwrap(), Info::default());
@@ -1035,7 +1041,7 @@ mod tests {
     #[test]
     fn what_is_on_an_invisible_layer_starts_hidden() {
         let rect = || {
-            let mut r = record(kind::RECTANGLE, 188, &[(0xa4, 1.0), (0xac, 1000.0), (0xb4, 500.0)]);
+            let mut r = pen(record(kind::RECTANGLE, 188, &[(0xa4, 1.0), (0xac, 1000.0), (0xb4, 500.0)]));
             r[0x64] = 1;
             r
         };
@@ -1059,7 +1065,7 @@ mod tests {
     fn a_plug_in_object_places_what_it_holds() {
         // as a window of the corpus: put at (2000, 8050), its line from (0, 0) to (1000, 0)
         let object = record(kind::PLUG_IN_OBJECT, 433, &[(0xf0, 1.0), (0x110, 1.0), (0x130, 1.0), (0x138, 2000.0), (0x140, 8050.0)]);
-        let line = record(kind::LINE, 140, &[(0x80, 1000.0)]);
+        let line = pen(record(kind::LINE, 140, &[(0x80, 1000.0)]));
         let records = vec![tagged(layer("L", 0.0), 1, 1, 0), tagged(object, 2, 0, 0), tagged(line, 3, 0, 0), tagged(record(kind::END, 88, &[]), 3, 0, 0), tagged(record(kind::END, 88, &[]), 2, 0, 0)];
         let u = unpacked(records);
         let scene = scene(&Raw::new(&u).unwrap(), Info::default());
@@ -1079,7 +1085,7 @@ mod tests {
         sheet.extend(&title);
         let n = sheet.len() as u64;
         sheet[0..8].copy_from_slice(&n.to_le_bytes());
-        let line = record(kind::LINE, 140, &[(0x80, 420.0)]);
+        let line = pen(record(kind::LINE, 140, &[(0x80, 420.0)]));
         let block = record(kind::PLUG_IN_OBJECT, 433, &[(0xf0, 1.0), (0x110, 1.0), (0x130, 1.0), (0x138, 100.0), (0x140, 50.0)]);
         let mut text = record(kind::TEXT, 0x19c, &[(0x68, 10.0), (0x70, 5.0), (0x78, 6.0), (0x80, 45.0), (0x108, 12.0)]);
         text[0xa6] = 5;
@@ -1115,7 +1121,7 @@ mod tests {
     #[test]
     fn sheet_layers_are_not_part_of_the_model() {
         let rect = || {
-            let mut r = record(kind::RECTANGLE, 188, &[(0xa4, 1.0), (0xac, 1000.0), (0xb4, 500.0)]);
+            let mut r = pen(record(kind::RECTANGLE, 188, &[(0xa4, 1.0), (0xac, 1000.0), (0xb4, 500.0)]));
             r[0x64] = 1;
             r
         };
@@ -1138,7 +1144,7 @@ mod tests {
 
     #[test]
     fn rectangle_on_a_layer_is_a_flat_face() {
-        let mut rect = record(kind::RECTANGLE, 188, &[(0xa4, 1.0), (0xac, 1000.0), (0xb4, 500.0)]);
+        let mut rect = pen(record(kind::RECTANGLE, 188, &[(0xa4, 1.0), (0xac, 1000.0), (0xb4, 500.0)]));
         // with a solid fill
         rect[0x64] = 1;
         let records = vec![tagged(layer("L", 3000.0), 1, 1, 0), tagged(rect, 2, 0, 0), tagged(record(kind::END, 88, &[]), 2, 0, 0)];

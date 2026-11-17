@@ -550,6 +550,7 @@ pub fn text(r: &Record) -> Option<Text> {
 pub mod by_class {
     pub const LINE_WEIGHT: u8 = 0x08;
     pub const PEN_COLOUR: u8 = 0x10;
+    pub const PEN: u8 = 0x20;
     pub const FILL_COLOUR: u8 = 0x40;
     pub const FILL: u8 = 0x80;
 }
@@ -577,9 +578,22 @@ pub fn pen_index(r: &Record, class: Option<&Record>) -> Option<u16> {
     }
 }
 
-/// True when a drawn object has a fill: the `u32` at 0x64 is 0 for none (sample 102), 1 for a
-/// solid fill; other numbers are other fills. An object that takes its fill from its class has
-/// 0 there, and the class says (`u32` at 0x60 of the class record).
+/// True when a drawn object has a pen, so that its lines are drawn: the `i32` at 0x50 is 0 for
+/// none, 2 for a solid line, and minus the reference number of a line type (type 96) for a
+/// dashed one. An object that takes its pen from its class has 0 there, and the class says
+/// (`i32` at 0x5a of the class record). Dashed lines are drawn solid.
+pub fn stroked(r: &Record, class: Option<&Record>) -> bool {
+    match class.filter(|_| from_class(r, by_class::PEN)) {
+        Some(class) => le::u32(class.bytes, 0x5a) != Some(0),
+        None => le::u32(r.bytes, 0x50) != Some(0),
+    }
+}
+
+/// True when a drawn object has a fill: the `i32` at 0x64 is 0 for none (sample 102), 1 for a
+/// solid fill, more for a pattern, and minus the reference number of a hatch (type 66), a
+/// gradient or an image for those (sample 260). An object that takes its fill from its class
+/// has 0 there, and the class says (`i32` at 0x60 of the class record). Every fill is drawn
+/// solid, in the fill colour.
 pub fn filled(r: &Record, class: Option<&Record>) -> bool {
     match class.filter(|_| from_class(r, by_class::FILL)) {
         Some(class) => le::u32(class.bytes, 0x60) != Some(0),
@@ -689,6 +703,15 @@ pub(crate) mod tests {
         assert_eq!((fill_index(&rec(&rect), Some(&c)), pen_index(&rec(&rect), Some(&c)), filled(&rec(&rect), Some(&c))), (Some(256), Some(1238), true));
         // without its class at hand: its own
         assert_eq!(fill_index(&rec(&rect), None), Some(256));
+        // the pen: none of its own, a solid one, one from its class (which has a solid pen)
+        assert!(!stroked(&rec(&rect), Some(&c)));
+        rect[0x50] = 2;
+        assert!(stroked(&rec(&rect), Some(&c)));
+        rect[0x50] = 0;
+        rect[0x24] = by_class::PEN;
+        assert!(!stroked(&rec(&rect), Some(&c)));
+        class[0x5a] = 2;
+        assert!(stroked(&rec(&rect), Some(&rec(&class))));
     }
 
     #[test]

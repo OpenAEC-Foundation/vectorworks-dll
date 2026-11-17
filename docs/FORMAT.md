@@ -76,7 +76,7 @@ Header (0x50 bytes, little-endian):
 | 0x1a | `u32le` | reference number of the object, 0 for none (pair 02/05: a named line gets one; layers, classes, symbol definitions and record formats always have one) |
 | 0x1f | `u8` | flags, `0x40` or `0x41` |
 | 0x20 | `u32le` | reference number of the class of the object (pair 02/40) |
-| 0x24 | `u8` | what the object takes from its class: bit 0x08 the line weight, 0x10 the pen colour, 0x40 the fill colour, 0x80 the fill (pairs 230 to 235; an object made with all its attributes by class has 0xff here and in the next byte) |
+| 0x24 | `u8` | what the object takes from its class: bit 0x08 the line weight, 0x10 the pen colour, 0x20 the pen, 0x40 the fill colour, 0x80 the fill (pairs 230 to 235; an object made with all its attributes by class has 0xff here and in the next byte) |
 | 0x26 | `u64le` | address of the parent object |
 | 0x2e | `u16` | `0x0011` objects, `0x0012`/`0x0002` user data and resources (not settled) |
 | 0x38 | 16 bytes | UUID of the object (zero in some records) |
@@ -125,8 +125,8 @@ layers.
 name at 0x20, its name is in the name list. The Dutch default class is `Geen` (number 2).
 Its visibility is the byte at 0xb6: 0 visible, 0xff invisible, 2 greyed (samples 130, 131, 132;
 the values the scripting interface gives). Its attributes: palette indexes as `u16`
-of the fill at 0x54 and of the pen at 0x56, the line weight as `u16` at 0x5e, the fill as `u32`
-at 0x60 (0 none, 1 solid); bit 0x80 of the byte at 0x50 says objects take the class attributes
+of the fill at 0x54 and of the pen at 0x56, the pen as `i32` at 0x5a, the line weight as `u16`
+at 0x5e, the fill as `i32` at 0x60 (as in objects); bit 0x80 of the byte at 0x50 says objects take the class attributes
 when made (samples 132, 230).
 
 **Layers (type 31).** Reference number at 0x1a, elevation `f64` at 0x20e (pair 90/95), its texts,
@@ -173,14 +173,14 @@ Every drawn object starts alike:
 
 | Offset | Type | Content |
 |---|---|---|
-| 0x50 | `u32` | 2 (not known) |
+| 0x50 | `i32` | the pen: 0 none, 2 a solid line, minus the reference number of a line type (type 96) for a dashed one |
 | 0x54 | `u16` | line weight in thousandths of an inch (4 by default; pair 02/104: 40) |
 | 0x56 | `u16` | palette index, 257 by default (fill foreground, assumed) |
 | 0x58 | `u16` | palette index of the fill (pair 10/41: 256 white to 1237 red) |
 | 0x5a | `u16` | palette index of the pen (pair 02/42: 257 black to 1238 blue) |
 | 0x5c | `u16` | palette index, 256 by default (pen background, assumed) |
 | 0x5e | 2 x `u8` | opacity of fill and pen in percent (sample 103: 40, 40) |
-| 0x64 | `u32` | the fill: 0 none (sample 102), 1 solid |
+| 0x64 | `i32` | the fill: 0 none (sample 102), 1 solid, more for a pattern, minus the reference number of a hatch (type 66), gradient or image (sample 260) |
 | 0x68 | 4 x `f64` | bounding box in plan: top, left, bottom, right |
 
 | Type | Size | Payload after the common part |
