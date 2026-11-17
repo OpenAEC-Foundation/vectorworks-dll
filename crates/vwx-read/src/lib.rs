@@ -24,6 +24,7 @@ pub mod palette;
 pub mod raw;
 pub mod records;
 pub mod shapes;
+pub mod styles;
 pub mod tri;
 
 pub use vwx_core::{Error, Result};
@@ -93,6 +94,7 @@ fn document(raw: &Raw, info: Info) -> Document {
         });
     }
     doc.info.objects = doc.objects.len();
+    styles::add_to(raw, &mut doc);
     doc
 }
 
