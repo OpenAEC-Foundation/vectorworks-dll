@@ -118,7 +118,7 @@ pub fn scene(raw: &Raw, info: Info) -> Scene {
     if 2 * hidden > all {
         meshes.iter_mut().for_each(|m| m.hidden = false);
     }
-    Scene { info, meshes, views: views(raw), texts: texts(raw), sheets: sheets(raw) }
+    Scene { info, meshes, views: views(raw), texts: texts(raw), sheets: sheets(raw), ..Scene::default() }
 }
 
 /// The texts on the design layers, on the elevation of their layer.
@@ -542,7 +542,9 @@ impl Builder<'_, '_> {
                 let value = match value {
                     crate::records::Value::Integer(v) => v.into(),
                     crate::records::Value::Boolean(v) => v.into(),
-                    crate::records::Value::Number(v) => v.into(),
+                    crate::records::Value::Number(v) | crate::records::Value::Date(v) => v.into(),
+                    crate::records::Value::Reference(v) => v.into(),
+                    crate::records::Value::Colour(v) => v.into(),
                     crate::records::Value::Text(v) if v.is_empty() => continue,
                     crate::records::Value::Text(v) => v.into(),
                 };
