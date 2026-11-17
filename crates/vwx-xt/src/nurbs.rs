@@ -4,6 +4,7 @@
 //! vector per direction, and for a rational surface a weight per control point, stored as a
 //! fourth coordinate with x, y and z multiplied by it (as the reference describes for curves).
 
+use crate::curve::ARC_STEP;
 use crate::geom::{cross, dist, dot, sub, unit, P3};
 
 /// Steps per knot span when a surface of degree 2 or more is drawn or searched.
@@ -28,6 +29,8 @@ pub struct NurbsSurface {
     samples: Vec<(f64, f64, P3)>,
     /// The size of the surface: the diagonal of the box around those points.
     size: f64,
+    /// Steps along u and along v the surface is drawn with.
+    steps: [usize; 2],
 }
 
 /// The index of the first basis function that is not zero at `t`, and the values of the
@@ -80,7 +83,7 @@ impl NurbsSurface {
             }
             vertices = turned;
         }
-        let mut s = NurbsSurface { degree, count, dim, vertices, knots, closed, samples: Vec::new(), size: 0.0 };
+        let mut s = NurbsSurface { degree, count, dim, vertices, knots, closed, samples: Vec::new(), size: 0.0, steps: [1, 1] };
         let (us, vs) = (s.parameters(0, 3), s.parameters(1, 3));
         s.samples = us.iter().flat_map(|&u| vs.iter().map(move |&v| (u, v))).map(|(u, v)| (u, v, s.eval_inside(u, v))).collect();
         let (mut lo, mut hi) = ([f64::MAX; 3], [f64::MIN; 3]);
@@ -94,7 +97,42 @@ impl NurbsSurface {
         if !s.size.is_finite() {
             return None;
         }
+        s.steps = s.turning([us.len(), vs.len()]);
         Some(s)
+    }
+
+    /// Steps along u and along v to draw the surface with: one for every [`ARC_STEP`] its
+    /// lines turn, or the lines across them turn from one to the next (a twisted surface),
+    /// measured on the sample grid of `grid[0]` by `grid[1]` points. A direction of degree 1
+    /// keeps its spans: its lines have corners there.
+    fn turning(&self, grid: [usize; 2]) -> [usize; 2] {
+        let at = |i: usize, j: usize| self.samples[i * grid[1] + j].2;
+        // the angle between two directions; none where one of them has no length
+        let angle = |a: P3, b: P3| {
+            let (la, lb) = (dot(a, a).sqrt(), dot(b, b).sqrt());
+            if la > 1e-12 * self.size && lb > 1e-12 * self.size {
+                (dot(a, b) / (la * lb)).clamp(-1.0, 1.0).acos()
+            } else {
+                0.0
+            }
+        };
+        [0, 1].map(|axis| {
+            if self.degree[axis] <= 1 {
+                return self.parameters(axis, 1).len().saturating_sub(1).clamp(1, MAX_STEPS);
+            }
+            // point k along `axis` on line `line` across it
+            let point = |k: usize, line: usize| if axis == 0 { at(k, line) } else { at(line, k) };
+            let (along, across) = (grid[axis], grid[1 - axis]);
+            let mut most = 0.0f64;
+            for line in 0..across {
+                let bend: f64 = (1..along.saturating_sub(1)).map(|k| angle(sub(point(k, line), point(k - 1, line)), sub(point(k + 1, line), point(k, line)))).sum();
+                let twist: f64 = if line + 1 < across { (1..along).map(|k| angle(sub(point(k - 1, line + 1), point(k - 1, line)), sub(point(k, line + 1), point(k, line)))).sum() } else { 0.0 };
+                most = most.max(bend).max(twist);
+            }
+            // the corners of a line of n pieces show (n - 1) / n of what the curve turns
+            let pieces = along.saturating_sub(1).max(2) as f64;
+            ((most * pieces / (pieces - 1.0) / ARC_STEP - 1e-9).ceil() as usize).clamp(1, MAX_STEPS)
+        })
     }
 
     /// The range of u (`axis` 0) or v (1) in which the surface is defined.
@@ -268,7 +306,7 @@ impl NurbsSurface {
     pub fn step(&self) -> [f64; 2] {
         [0, 1].map(|axis| {
             let (lo, hi) = self.range(axis);
-            (hi - lo) / (self.parameters(axis, SPAN_STEPS).len() - 1).max(1) as f64
+            (hi - lo) / self.steps[axis] as f64
         })
     }
 
@@ -368,6 +406,19 @@ pub(crate) mod tests {
         // a search that starts on the other side of the seam goes across it
         let [u, _] = tube.invert_near(tube.eval(3.9, 0.5), [0.1, 0.5]);
         assert!((u + 0.1).abs() < 1e-9, "{u}");
+    }
+
+    #[test]
+    fn steps_follow_the_bend_of_the_surface() {
+        // a quarter circle takes a quarter of the steps of a circle (or one more: the turn is
+        // an estimate); straight along v, one
+        let [u, v] = quarter_cylinder().step();
+        assert!((1.0 / 9.0 - 1e-12..=1.0 / 8.0 + 1e-12).contains(&u) && (v - 1.0).abs() < 1e-12, "{u} {v}");
+        // a flat patch of degree 2 either way, with many control points: one step each way
+        let grid: Vec<f64> = (0..5).flat_map(|i| (0..5).flat_map(move |j| [i as f64, j as f64, 0.0])).collect();
+        let knots = vec![0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 3.0, 3.0];
+        let flat = NurbsSurface::new([2, 2], [5, 5], 3, grid, [knots.clone(), knots], [false, false], false).unwrap();
+        assert_eq!(flat.step(), [3.0, 3.0]);
     }
 
     #[test]

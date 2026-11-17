@@ -17,7 +17,7 @@ pub mod surface;
 pub mod tess;
 
 pub use parse::{parse, Error, File, Node, Result, Value};
-pub use tess::{tessellate, Mesh};
+pub use tess::{tessellate, trimmed, Mesh};
 
 /// Node type codes used by name.
 pub mod code {

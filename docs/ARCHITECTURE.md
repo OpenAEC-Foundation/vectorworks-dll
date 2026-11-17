@@ -35,11 +35,11 @@ Black-box only (see the clean-room rules in the README):
 | Header: versions (made with, saved by), lengths, build | **done** for files saved by VW 2023 and 2027; older headers recognised only | 787 corpus files |
 | Container: Snappy blocks, records, object types, object tree | **done** (`vwx_core::container`) | 787 of 787 corpus files open, 2.2 M objects, 26 s |
 | Document tables: reference table, name list, classes, layers (name, elevation), colour palette | **done**; units and origin, class attributes and visibility open | ladder samples; palette against the scripting API |
-| 2D primitives: line, rectangle, oval, polygon, arc, circle, locus | **done**; polyline, rounded rectangle, text open | ladder samples 02 to 18 |
-| 3D primitives: extrude, 3D polygon, mesh | **done**; multiple extrude, sweep, NURBS open | meshes equal to Vectorworks' STL export for samples 20 to 27, 30 |
+| 2D primitives: line, rectangle, oval, polygon, arc, circle, locus | **done**, with rounded rectangle and polyline (arc and Bezier vertices); text and cubic vertices open | ladder samples 02 to 18, 111 to 113, 220 |
+| 3D primitives: extrude, multiple extrude, sweep, 3D polygon, mesh, sphere, hemisphere, cone, NURBS surface with its boundaries | **done**; NURBS curves on their own open | meshes with the bounds of Vectorworks' STL export for all 48 samples that have one |
 | Symbols: definitions, instances (placement, scale) | **done** | STL export of samples 50, 51 |
 | Groups and nesting | **done** | sample 43 |
-| Solids as Parasolid bodies (walls, CSG solids, sweeps, multiple extrudes, NURBS surfaces): type 114 section 19, read by `vwx-xt` | **done** for planes, cylinders, cones, spheres, tori; faces on B-surfaces, swept, spun, blend and offset surfaces are filled flat; primitives (type 95, 85) open | STL export of samples 34, 35, 60 to 65: same bounds and triangle counts; 67 714 of 67 788 corpus bodies parse |
+| Solids as Parasolid bodies (walls, CSG solids, sweeps, multiple extrudes): type 114 section 19, read by `vwx-xt` | **done** for planes, cylinders, cones, spheres, tori, B-surfaces, swept and spun surfaces; faces on blend and offset surfaces are filled flat | STL export of samples 34, 35, 60 to 65, 210 to 216; 67 714 of 67 788 corpus bodies parse; 99.2 % of the 641 490 corpus faces are triangulated on their surface |
 | Slabs, roofs, columns, doors, windows, stairs, spaces | not started | — |
 | Records and IFC data attached to objects | not started | — |
 | Viewer meshes (`vwx_read::read`): per layer and class, objects pickable, colours from the palette; a file with nothing on its layers shows its symbol definitions side by side | **started**: 419 of the 787 corpus files give meshes, 45 M triangles | STL comparison `tools/compare_stl.py`: 23 of 30 samples equal, 7 not drawn yet |

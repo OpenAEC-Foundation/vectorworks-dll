@@ -82,6 +82,43 @@ pub fn tessellate(file: &File) -> Mesh {
     mesh
 }
 
+/// Triangles of the part of a B-surface inside rings given in its parameters (u, v), counted
+/// even-odd: an outline and its holes, in any order. Without rings, or with rings that cannot
+/// be used, the whole surface. The normals are the natural normals.
+pub fn trimmed(surface: &std::rc::Rc<crate::nurbs::NurbsSurface>, loops: &[Vec<P2>]) -> Mesh {
+    let s = Surface::of(surface.clone());
+    let step = s.step();
+    let mut rings = Vec::new();
+    for uv in loops {
+        // a ring has three points or more and goes around something
+        if uv.len() < 3 || area2(uv) == 0.0 {
+            continue;
+        }
+        let mut ring = Ring::default();
+        for (i, a) in uv.iter().enumerate() {
+            let b = uv[(i + 1) % uv.len()];
+            // an edge that is straight in (u, v) bends with the surface
+            let wide = ((b[0] - a[0]) / step[0]).abs().max(((b[1] - a[1]) / step[1]).abs());
+            let parts = if wide.is_finite() { (wide.ceil() as usize).clamp(1, 256) } else { 1 };
+            for k in 0..parts {
+                let t = k as f64 / parts as f64;
+                ring.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t], None);
+            }
+        }
+        ring.corners.dedup_by(|a, b| a.uv == b.uv);
+        if ring.corners.len() >= 3 {
+            rings.push(ring);
+        }
+    }
+    let mut mesh = Mesh::default();
+    if rings.is_empty() || !triangulate(&mut mesh, &rings, &s, 1.0, false) {
+        mesh = Mesh::default();
+        let _ = curved(&mut mesh, &[], &s, 1.0);
+    }
+    mesh.faces = 1;
+    mesh
+}
+
 /// Fills a face flat between its loops, for a surface that is not evaluated.
 fn approximate(mesh: &mut Mesh, file: &File, face: &Node, loops: &[Vec<P3>], why: &'static str) {
     mesh.approximate += 1;
@@ -579,12 +616,20 @@ fn triangulate(mesh: &mut Mesh, rings: &[Ring], s: &Surface, sign: f64, swap: bo
             continue;
         }
         let [a, b, c] = t.map(|i| mesh.positions[base as usize + i]);
-        let geometric = cross(sub(b, a), sub(c, a));
-        if len(geometric) == 0.0 {
+        // a triangle without area (two of its corners at a pole) is left out
+        let longest = len(sub(b, a)).max(len(sub(c, b))).max(len(sub(a, c)));
+        if len(cross(sub(b, a), sub(c, a))) <= 1e-12 * longest * longest {
             continue;
         }
+        // turned to the normals at its corners. Where those do not say (a sliver, a corner
+        // where the surface has no normal): counter-clockwise in (u, v) is counter-clockwise
+        // about the natural normal, and the triangulation gives counter-clockwise in (a, b).
+        // That alone would not do: at a pole a triangle can turn the other way in space
+        let geometric = cross(sub(b, a), sub(c, a));
         let wanted = add(add(mesh.normals[base as usize + t[0]], mesh.normals[base as usize + t[1]]), mesh.normals[base as usize + t[2]]);
-        let t = if dot(geometric, wanted) >= 0.0 { t } else { [t[0], t[2], t[1]] };
+        let agree = dot(geometric, wanted);
+        let keep = if agree.abs() > 1e-6 * len(geometric) * len(wanted) { agree > 0.0 } else { (sign > 0.0) != swap };
+        let t = if keep { t } else { [t[0], t[2], t[1]] };
         mesh.triangles.push(t.map(|i| base + i as u32));
     }
     mesh.triangles.len() > before
@@ -620,7 +665,9 @@ mod tests {
             let [a, b, c] = t.map(|i| mesh.positions[i as usize]);
             let n = cross(sub(b, a), sub(c, a));
             let out = outward(mul(add(add(a, b), c), 1.0 / 3.0));
-            len(n) < 1e-9 || (dot(n, out) > 0.0 && t.iter().all(|&i| dot(mesh.normals[i as usize], out) > 0.0))
+            // (a triangle on edge to the surface, as one up a meridian to a pole, turns neither way)
+            let on_edge = dot(n, out).abs() < 1e-9 * len(n) * len(out);
+            len(n) < 1e-9 || on_edge || (dot(n, out) > 0.0 && t.iter().all(|&i| dot(mesh.normals[i as usize], out) > 0.0))
         })
     }
 
@@ -708,6 +755,21 @@ mod tests {
         let mut whole_patch = Mesh::default();
         assert_eq!(curved(&mut whole_patch, &[], &s, 1.0), Ok(()));
         assert!((area(&whole_patch) / (TAU / 2.0) - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn b_surface_inside_rings_in_its_parameters() {
+        let n = std::rc::Rc::new(crate::nurbs::tests::quarter_cylinder());
+        // half of it along the arc, with a hole
+        let outline = vec![[0.0, 0.0], [0.5, 0.0], [0.5, 1.0], [0.0, 1.0]];
+        let hole = vec![[0.2, 0.4], [0.3, 0.4], [0.3, 0.6], [0.2, 0.6]];
+        let (whole, half, holed) = (trimmed(&n, &[]), trimmed(&n, std::slice::from_ref(&outline)), trimmed(&n, &[hole.clone(), outline]));
+        assert!((area(&whole) / (TAU / 2.0) - 1.0).abs() < 0.01);
+        assert!(area(&half) > 0.2 * area(&whole) && area(&half) < 0.8 * area(&whole));
+        assert!(area(&holed) < area(&half) && area(&holed) > 0.8 * area(&half));
+        assert!(holed.positions.iter().all(|p| (p[0].hypot(p[1]) - 1.0).abs() < 1e-9));
+        // rings that are no rings give the whole surface
+        assert_eq!(trimmed(&n, &[vec![[0.0, 0.0], [1.0, 1.0]]]).triangles.len(), whole.triangles.len());
     }
 
     #[test]

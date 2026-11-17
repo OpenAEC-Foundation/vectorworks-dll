@@ -19,7 +19,8 @@
 //!
 //! Output: metres, Z up.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::rc::Rc;
 
 use vwx_model::{Info, Mesh, Scene};
 
@@ -37,7 +38,7 @@ const DEFAULT_COLOR: [u8; 3] = [200, 200, 204];
 
 /// The meshes of a document.
 pub fn scene(raw: &Raw, info: Info) -> Scene {
-    let mut builder = Builder { raw, batches: BTreeMap::new(), elevation: 0.0 };
+    let mut builder = Builder { raw, batches: BTreeMap::new(), elevation: 0.0, bodies: HashMap::new() };
     for (i, r) in raw.records.iter().enumerate() {
         if r.kind() != kind::LAYER {
             continue;
@@ -82,6 +83,9 @@ struct Builder<'a, 'b> {
     batches: BTreeMap<(usize, u32), Batch>,
     /// Elevation of the layer being drawn (millimetres).
     elevation: f64,
+    /// The triangles of the Parasolid bodies read so far, by record: an object inside a symbol
+    /// is drawn once for every place the symbol is put.
+    bodies: HashMap<usize, Option<Rc<vwx_xt::Mesh>>>,
 }
 
 impl Builder<'_, '_> {
@@ -204,8 +208,18 @@ impl Builder<'_, '_> {
         match r.kind() {
             kind::END | kind::USER_DATA => {}
             // the children of a CSG solid are its operands; the result is its Parasolid body
-            kind::CSG_SOLID | kind::NURBS_SURFACE => {
+            kind::CSG_SOLID => {
                 self.body(i, place, key, color, true);
+            }
+            // a NURBS surface, inside its boundaries (its children, in its parameters)
+            kind::NURBS_SURFACE => {
+                if self.body(i, place, key, color, true) {
+                    return;
+                }
+                let Some(surface) = shapes::nurbs_surface(r) else { return };
+                let loops: Vec<Vec<P2>> = raw.children[i].iter().filter(|&&c| raw.records[c].kind() == kind::NURBS_CURVE).filter_map(|&c| shapes::trim_loop(&raw.records[c])).collect();
+                let patch = vwx_xt::trimmed(&Rc::new(surface), &loops);
+                self.solid(key, color, &patch, place);
             }
             kind::EXTRUDE => {
                 // the exact body when the file has one and all of it is read
@@ -294,7 +308,7 @@ impl Builder<'_, '_> {
                     }
                 }
             }
-            kind::RECTANGLE | kind::OVAL | kind::POLYGON | kind::ARC => {
+            kind::RECTANGLE | kind::ROUNDED_RECTANGLE | kind::OVAL | kind::POLYGON | kind::POLYLINE | kind::ARC => {
                 if nested {
                     return;
                 }
@@ -341,7 +355,7 @@ impl Builder<'_, '_> {
         let Some(&child) = raw.children[i].iter().find(|&&c| raw.records[c].kind() == kind::BODY) else {
             return false;
         };
-        let Some(body) = shapes::body(&raw.records[child]) else {
+        let Some(body) = self.bodies.entry(child).or_insert_with(|| shapes::body(&raw.records[child]).map(Rc::new)).clone() else {
             return false;
         };
         if !approximate && body.approximate > 0 {
@@ -364,6 +378,12 @@ impl Builder<'_, '_> {
             Some((placement, _)) => placement.then(place),
             None => *place,
         };
+        self.solid(key, color, &body, &place);
+        true
+    }
+
+    /// Adds the triangles of `body` (millimetres), placed by `place`.
+    fn solid(&mut self, key: (usize, u32), color: [u8; 3], body: &vwx_xt::Mesh, place: &Affine) {
         let flip = place.mirrors();
         let mesh = &mut self.batch(key).mesh;
         let base = (mesh.positions.len() / 3) as u32;
@@ -380,7 +400,6 @@ impl Builder<'_, '_> {
             let t = if flip { [t[0], t[2], t[1]] } else { *t };
             mesh.indices.extend(t.map(|k| base + k));
         }
-        true
     }
 
     /// The grid of points (type 42) among the children of record `i`.

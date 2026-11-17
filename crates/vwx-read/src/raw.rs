@@ -14,6 +14,8 @@ pub mod kind {
     pub const POLYGON: u8 = 5;
     pub const ARC: u8 = 6;
     pub const GROUP: u8 = 11;
+    pub const ROUNDED_RECTANGLE: u8 = 13;
+    pub const POLYLINE: u8 = 21;
     pub const SYMBOL: u8 = 15;
     pub const SYMBOL_DEFINITION: u8 = 16;
     pub const EXTRUDE: u8 = 24;
@@ -28,6 +30,7 @@ pub mod kind {
     pub const SWEEP: u8 = 34;
     pub const MULTIPLE_EXTRUDE: u8 = 38;
     pub const CSG_SOLID: u8 = 84;
+    pub const NURBS_CURVE: u8 = 111;
     pub const NURBS_SURFACE: u8 = 113;
     /// The cached solid body of its parent: wire frame and Parasolid data.
     pub const BODY: u8 = 114;

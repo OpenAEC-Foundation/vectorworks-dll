@@ -220,6 +220,7 @@ fn run(args: &[String]) -> Result<Option<Value>, String> {
             let (mut faces, mut approximate, mut skipped, mut triangles) = (0usize, 0usize, 0usize, 0usize);
             let mut straight = std::collections::BTreeMap::<String, usize>::new();
             let mut approximate_by = std::collections::BTreeMap::<String, usize>::new();
+            let mut triangles_by = std::collections::BTreeMap::<String, usize>::new();
             // edges between triangles: used once each way (as in a closed, consistently turned
             // skin), twice the same way (one of the two faces is inside out), or otherwise
             let (mut paired, mut unpaired) = (0usize, 0usize);
@@ -249,6 +250,10 @@ fn run(args: &[String]) -> Result<Option<Value>, String> {
                             *approximate_by.entry(format!("{name}: {why}")).or_default() += 1;
                         }
                         triangles += mesh.triangles.len();
+                        for (k, face) in mesh.face_starts.iter().enumerate() {
+                            let end = mesh.face_starts.get(k + 1).map_or(mesh.triangles.len(), |f| f.0);
+                            *triangles_by.entry(vwx_xt::schema::base(face.1).map_or("none", |b| b.0).to_string()).or_default() += end - face.0;
+                        }
                         {
                             let (mut blo, mut bhi) = ([f64::MAX; 3], [f64::MIN; 3]);
                             for p in &mesh.positions {
@@ -325,7 +330,7 @@ fn run(args: &[String]) -> Result<Option<Value>, String> {
             let bounds = if triangles > 0 { json!([lo, hi]) } else { Value::Null };
             Ok(Some(json!({
                 "bodies": starts.len(), "parsed": ok, "nodes": nodes, "schemas": schemas, "types": kinds, "errors": errors,
-                "faces": faces, "approximate_faces": approximate, "skipped_faces": skipped, "triangles": triangles, "bounds": bounds, "straight_edges_by_curve": straight, "approximate_by_surface": approximate_by,
+                "faces": faces, "approximate_faces": approximate, "skipped_faces": skipped, "triangles": triangles, "bounds": bounds, "straight_edges_by_curve": straight, "approximate_by_surface": approximate_by, "triangles_by_surface": triangles_by,
                 "edges": {"paired": paired, "unpaired": unpaired, "same_way_by_surfaces": same_way},
             })))
         }

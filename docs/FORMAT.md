@@ -185,6 +185,15 @@ Every drawn object starts alike:
 | 16 symbol definition | 372 | its children are the content; found by its reference number |
 | 11 group | 204 | its children |
 | 84 CSG solid | 386 | children: a type 114 record with the result and the operands |
+| 34 sweep | 356 | as the extrude up to 0x138; pitch (the rise along the axis in one turn) at 0x140; step, start and arc in degrees at 0x148, 0x150, 0x158. The profile, drawn in the local xy plane, turns about the line along local y through its smallest x: at angle a a profile point (x, y) is at (axis + (x - axis) sin a, y + pitch (a - start) / 360, (x - axis) cos a) (samples 29, 200 to 203) |
+| 38 multiple extrude | | placement at 0xcc as the extrude; children: its profiles and a type 42 record with one ring of points per profile (samples 28, 222) |
+| 42 profile points | 0x72 + 24n | a child of a profile shape (or of a multiple extrude): the points Vectorworks worked the profile out to, curves already stepped. `u16` points per ring at 0x6c, `u16` rings at 0x6e, `u16` total at 0x70; x, y, z from 0x72, for each point of the profile one per ring. An extrude has two rings (bottom, top), a multiple extrude one per profile, a sweep every turned position of its profile |
+| 95 solid | | a primitive (sphere, hemisphere, cone): placement at 0x94, box in the document at 0xf4. Its type 85 child is the mesh Vectorworks keeps for it (samples 31 to 33, 300 to 303) |
+| 85 mesh of a solid | | four `u32` at 0x8c: points, corner numbers, faces, edges; the points (x, y, z) from 0x9c, in the coordinates the solid is placed in; the corner numbers as `u32`, counted from 1; per face a `u32` count of corners and the `u32` position of its first corner number; per edge 16 bytes |
+| 113 NURBS surface | 0xb0 + 32 nu nv + 8 (ku + kv) | six `u32` at 0x98: control points along u and along v, knots of u and of v, degree along u and along v; from 0xb0 the control points, four `f64` each (x w, y w, z w, w), u running slowest; then the knots of u and those of v, written out in full. In the coordinates the object is placed in (the layer elevation is in the points). Its type 111 children are its boundaries (sample 122) |
+| 111 NURBS curve | | as a child of a NURBS surface: one boundary of it, in the parameters (u, v) of the surface. `u32` count of pieces at 0x8c; from 0x90 piece after piece around the boundary, each: `u32` control points, `u32` knots, `u32` degree, a `u32`; the control points, four `f64` each (u w, v w, 0, w); the knots (sample 122: four straight pieces around the unit square) |
+| 21 polyline | 0x90 + 36n | `u16` count at 0x8e; vertices of 36 bytes from 0x90: y, x, a `u32` whose second byte is the kind of vertex (0 corner, 1 Bezier, 3 arc), an `f64` radius, 8 bytes. A Bezier vertex is the control point of a quadratic curve, an arc vertex a corner rounded by a circle of that radius (0: as large as fits); a curve runs from and to a neighbouring corner, and half way to a neighbour that is a curve itself. As a profile its type 42 child has Vectorworks' own points of it (samples 111, 113) |
+| 13 rounded rectangle | 204 | as the rectangle, then the width and height of the ellipse its corners are quarters of at 0xbc and 0xc4 (samples 112, 220) |
 | 68 wall | 2274+ | children: plan graphics (lines, polygons), a record, and a CSG solid with the wall's body |
 
 ### Solids: type 114 and Parasolid
@@ -219,15 +228,44 @@ for `LIST` and `POINTER_LIS_BLOCK`, whose 13006 layouts were found from those ed
 (`tools/gen_xt_schema.py`). The corpus holds 67 788 bodies in 281 files, written by 65 versions
 of the modeller (schemas 19008 to 38101); 67 714 parse.
 
-Faces by surface in the corpus, of 641 490: plane 84 %, cylinder 7 %, B-surface 3 %, swept 1 %,
-sphere, torus, blend, cone, offset and spun under 1 % each. Planes, cylinders, cones, spheres and
-tori are triangulated; faces on the others are filled flat between their edges for now.
+**Faces.** A face is a part of a surface inside loops of edges. Planes are triangulated in
+their plane; every other face in the parameters (u, v) of its surface (a constrained Delaunay
+triangulation of the loops, with points inside where the surface bends both ways), so that
+neighbouring faces share the points of their common edge. Surfaces that are evaluated: plane,
+cylinder, cone, sphere, torus, B-surface (NURBS), swept surface (a curve moved along a
+direction) and spun surface (a curve turned about an axis). Blend and offset surfaces are not:
+their faces are filled flat between their edges and counted as approximate.
 
-Solids made as primitives (type 95: sphere, cone, hemisphere) have a type 85 child instead: a
-cached mesh of their own, not decoded.
+Of the 641 490 faces in the corpus (plane 84 %, cylinder 7 %, B-surface 3 %, swept 1 %, the
+others under 1 % each) 4 821 are filled flat: 2 194 on blend and 199 on offset surfaces, the
+others faces whose loops could not be laid out in the parameters of their surface (a loop that
+seems to go around more than once, two loops around the axis the same way); 132 give no
+triangles. `Residential New Construction.sta`: all 4 345 faces on their surface.
+
+Where the data is not as the reference prints it, found on corpus files:
+
+- **cone**: `P + vA + (X cos u + Y sin u)(r + v tan a)`, the mirror image of the printed
+  `P - vA + ...`. The corners of 58 cone faces of `Residential New Construction.sta` lie on
+  this surface and up to 0.5 mm off the printed one, and curves given in the parameters of a
+  cone have `v` along `A`;
+- **ellipse**: `sense` comes before `centre`, as in every other curve (the printed struct has
+  `centre` first, which gives centres and axes that are not numbers);
+- **B-surface**: the control points run with u slowest (225 faces fit that order, none the
+  other). A face may lie beyond the range of its surface: there the surface goes on straight.
+  A closed direction is followed round;
+- a curve in the parameters of a surface (SP-curve) that is straight there is still curved in
+  space: a half circle on a cylinder is one segment of degree 1.
+
+An orientation check that needs no reference: in a closed skin every edge between two triangles
+is used once in each direction. `vwx xt` counts the edges used so, those used twice the same way
+(one of the two faces inside out) and the rest (edges of faces whose common edge was stepped
+differently, and of open sheets).
+
+Solids made as primitives (type 95: sphere, cone, hemisphere) have no Parasolid body: their
+type 85 child is a mesh (see the table above).
 
 ### Not decoded yet
 
-Polyline (21), text (10), rounded rectangle (13), sweep (34), multiple extrude (38), NURBS (111, 113), type 42 under profile shapes, slab (71), plug-in object (86), viewport
+Text (10), cubic vertices of polylines, NURBS curve (111) on its own, slab (71), plug-in object (86), viewport
 (122), records and formats (47, 48), styles (102, 107, 127), saved views, sheet layers, class
 attributes and visibility.

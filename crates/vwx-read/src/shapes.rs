@@ -13,6 +13,8 @@ pub type P3 = [f64; 3];
 
 /// Segments a full circle is drawn with.
 const CIRCLE_SEGMENTS: usize = 48;
+/// Segments a Bezier piece of a polyline is drawn with.
+const BEZIER_SEGMENTS: usize = 12;
 
 /// A placement: `world = x·rows[0] + y·rows[1] + z·rows[2] + offset`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -84,10 +86,115 @@ fn frame(r: &Record) -> Option<(P2, P2, f64, f64)> {
     Some((yx(r, 0x8c)?, yx(r, 0x9c)?, real(r, 0xac)?, real(r, 0xb4)?))
 }
 
+/// A vertex of a polyline: where it is, what kind it is (0 a corner, 1 the control point of a
+/// Bezier curve, 3 a corner rounded by an arc; 2, a point a cubic curve goes through, is drawn
+/// as a corner) and the radius of its arc (0: as large as fits).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Vertex {
+    pub at: P2,
+    pub kind: u8,
+    pub radius: f64,
+}
+
+/// The vertices of a polyline (type 21): `u16` count at 0x8e, then 36 bytes each from 0x90:
+/// the point (y, x), a `u32` whose second byte is the kind, the radius, 8 bytes.
+pub fn polyline(r: &Record) -> Option<Vec<Vertex>> {
+    let count = le::u16(r.bytes, 0x8e)? as usize;
+    (0..count)
+        .map(|k| {
+            let at = 0x90 + 36 * k;
+            Some(Vertex { at: yx(r, at)?, kind: *r.bytes.get(at + 17)?, radius: real(r, at + 20)? })
+        })
+        .collect()
+}
+
+/// The closed outline through the vertices of a polyline, curves stepped.
+///
+/// A curve at a vertex runs between its two neighbours: from and to a neighbour that is a
+/// corner, and half way to a neighbour that is a curve itself. A Bezier vertex is the control
+/// point of a quadratic curve between those two points; an arc vertex is rounded by a circle
+/// that touches both sides (sample 113: Vectorworks' own points of such a profile).
+pub fn polyline_outline(vertices: &[Vertex]) -> Vec<P2> {
+    const BEZIER: u8 = 1;
+    const ARC: u8 = 3;
+    let n = vertices.len();
+    let mut out: Vec<P2> = Vec::new();
+    for i in 0..n {
+        let (previous, v, next) = (vertices[(i + n - 1) % n], vertices[i], vertices[(i + 1) % n]);
+        let towards = |other: Vertex| if matches!(other.kind, BEZIER | ARC) { [(v.at[0] + other.at[0]) / 2.0, (v.at[1] + other.at[1]) / 2.0] } else { other.at };
+        let (a, b) = (towards(previous), towards(next));
+        match v.kind {
+            BEZIER => out.extend((0..=BEZIER_SEGMENTS).map(|k| {
+                let t = k as f64 / BEZIER_SEGMENTS as f64;
+                let (wa, wv, wb) = ((1.0 - t) * (1.0 - t), 2.0 * t * (1.0 - t), t * t);
+                [wa * a[0] + wv * v.at[0] + wb * b[0], wa * a[1] + wv * v.at[1] + wb * b[1]]
+            })),
+            ARC => {
+                let (da, db) = ([a[0] - v.at[0], a[1] - v.at[1]], [b[0] - v.at[0], b[1] - v.at[1]]);
+                let (la, lb) = (da[0].hypot(da[1]), db[0].hypot(db[1]));
+                let cos = if la > 0.0 && lb > 0.0 { ((da[0] * db[0] + da[1] * db[1]) / (la * lb)).clamp(-1.0, 1.0) } else { 1.0 };
+                // half the angle between the two sides; no arc in a corner that is no corner
+                let half = cos.acos() / 2.0;
+                if half < 1e-6 || half > std::f64::consts::FRAC_PI_2 - 1e-6 {
+                    out.push(v.at);
+                    continue;
+                }
+                // the arc touches the sides at `reach` from the corner
+                let fits = la.min(lb);
+                let reach = if v.radius > 0.0 { (v.radius / half.tan()).min(fits) } else { fits };
+                let (ua, ub) = ([da[0] / la, da[1] / la], [db[0] / lb, db[1] / lb]);
+                let (from, to) = ([v.at[0] + ua[0] * reach, v.at[1] + ua[1] * reach], [v.at[0] + ub[0] * reach, v.at[1] + ub[1] * reach]);
+                let bisector = [ua[0] + ub[0], ua[1] + ub[1]];
+                let scale = reach / half.cos() / bisector[0].hypot(bisector[1]);
+                let centre = [v.at[0] + bisector[0] * scale, v.at[1] + bisector[1] * scale];
+                let (start, end) = ((from[1] - centre[1]).atan2(from[0] - centre[0]), (to[1] - centre[1]).atan2(to[0] - centre[0]));
+                // the short way round
+                let turn = (end - start + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI;
+                let radius = reach * half.tan();
+                let steps = ((turn.abs() / std::f64::consts::TAU * CIRCLE_SEGMENTS as f64).ceil() as usize).max(1);
+                out.push(from);
+                out.extend((1..steps).map(|k| {
+                    let angle = start + turn * k as f64 / steps as f64;
+                    [centre[0] + radius * angle.cos(), centre[1] + radius * angle.sin()]
+                }));
+                out.push(to);
+            }
+            _ => out.push(v.at),
+        }
+    }
+    let near = |p: &P2, q: &P2| (p[0] - q[0]).abs() < 1e-9 && (p[1] - q[1]).abs() < 1e-9;
+    out.dedup_by(|p, q| near(p, q));
+    while out.len() > 1 && near(&out[0], &out[out.len() - 1]) {
+        out.pop();
+    }
+    out
+}
+
 /// The closed outline of a 2D object, counter-clockwise or clockwise as drawn: a rectangle, an
-/// oval, a polygon of three or more points, a full circle. `None` for anything else.
+/// oval, a polygon or polyline of three or more points, a full circle. `None` for anything else.
 pub fn outline(r: &Record) -> Option<Vec<P2>> {
     match r.kind() {
+        kind::POLYLINE => Some(polyline_outline(&polyline(r)?)).filter(|p| p.len() >= 3),
+        kind::ROUNDED_RECTANGLE => {
+            // a rectangle, and the width and height of the ellipse its corners are quarters
+            // of at 0xbc and 0xc4
+            let (o, d, w, h) = frame(r)?;
+            let n = [-d[1], d[0]];
+            let (rx, ry) = ((real(r, 0xbc)? / 2.0).clamp(0.0, w.abs() / 2.0), (real(r, 0xc4)? / 2.0).clamp(0.0, h.abs() / 2.0));
+            let (su, sv) = (w.signum(), h.signum());
+            let quarter = CIRCLE_SEGMENTS / 4;
+            let mut out = Vec::with_capacity(4 * (quarter + 1));
+            // the corners in turn, each from where the side before it ends
+            for (k, (cu, cv)) in [(w - su * rx, sv * ry), (w - su * rx, h - sv * ry), (su * rx, h - sv * ry), (su * rx, sv * ry)].into_iter().enumerate() {
+                for step in 0..=quarter {
+                    let a = (k as f64 - 1.0 + step as f64 / quarter as f64) * std::f64::consts::FRAC_PI_2;
+                    let (u, v) = (cu + su * rx * a.cos(), cv + sv * ry * a.sin());
+                    out.push([o[0] + u * d[0] + v * n[0], o[1] + u * d[1] + v * n[1]]);
+                }
+            }
+            out.dedup_by(|p, q| (p[0] - q[0]).abs() < 1e-9 && (p[1] - q[1]).abs() < 1e-9);
+            Some(out).filter(|p| p.len() >= 3)
+        }
         kind::RECTANGLE => {
             let (o, d, w, h) = frame(r)?;
             let n = [-d[1], d[0]];
@@ -241,6 +348,63 @@ pub fn body(r: &Record) -> Option<vwx_xt::Mesh> {
     Some(mesh)
 }
 
+/// Most pieces of one boundary of a NURBS surface.
+const MAX_PIECES: usize = 100_000;
+
+/// A NURBS surface (type 113): at 0x98 six `u32`: the control points along u and along v, the
+/// knots of u and of v, the degree along u and along v. From 0xb0 the control points, four
+/// `f64` each (x·w, y·w, z·w, w), u running slowest; then the knots of u and those of v, all
+/// written out. In millimetres, in the coordinates the object is placed in.
+pub fn nurbs_surface(r: &Record) -> Option<vwx_xt::nurbs::NurbsSurface> {
+    let n = |k: usize| le::u32(r.bytes, 0x98 + 4 * k).map(|v| v as usize);
+    let (nu, nv, ku, kv, du, dv) = (n(0)?, n(1)?, n(2)?, n(3)?, n(4)?, n(5)?);
+    let points = nu.checked_mul(nv)?;
+    let knots_at = points.checked_mul(32)?.checked_add(0xb0)?;
+    if knots_at.checked_add(ku.checked_add(kv)?.checked_mul(8)?)? > r.bytes.len() {
+        return None;
+    }
+    let reals = |at: usize, count: usize| -> Option<Vec<f64>> { (0..count).map(|k| le::f64(r.bytes, at + 8 * k)).collect() };
+    vwx_xt::nurbs::NurbsSurface::new([du, dv], [nu, nv], 4, reals(0xb0, points * 4)?, [reals(knots_at, ku)?, reals(knots_at + 8 * ku, kv)?], [false, false], false)
+}
+
+/// A boundary of a NURBS surface (type 111 as a child of the surface), in the parameters
+/// (u, v) of the surface: a `u32` count of pieces at 0x8c, then from 0x90 piece after piece
+/// around the boundary. A piece: `u32` counts of control points and of knots, `u32` degree and
+/// a `u32`; its control points, four `f64` each (u·w, v·w, 0, w); its knots. Returned: the
+/// ring of (u, v) the boundary is drawn with.
+pub fn trim_loop(r: &Record) -> Option<Vec<P2>> {
+    let pieces = le::u32(r.bytes, 0x8c)? as usize;
+    let mut at = 0x90usize;
+    let mut ring: Vec<P2> = Vec::new();
+    for _ in 0..pieces.min(MAX_PIECES) {
+        let count = |k: usize| le::u32(r.bytes, at + 4 * k).map(|v| v as usize);
+        let (points, knots, degree) = (count(0)?, count(1)?, count(2)?);
+        let knots_at = points.checked_mul(32)?.checked_add(at + 16)?;
+        let end = knots.checked_mul(8)?.checked_add(knots_at)?;
+        if end > r.bytes.len() {
+            return None;
+        }
+        let reals = |at: usize, count: usize| -> Option<Vec<f64>> { (0..count).map(|k| le::f64(r.bytes, at + 8 * k)).collect() };
+        let curve = vwx_xt::curve::Nurbs { degree, dim: 4, vertices: reals(at + 16, points * 4)?, knots: reals(knots_at, knots)?, rational: true };
+        curve.range()?;
+        for t in curve.parameters() {
+            let p = curve.eval(t);
+            let uv = [p[0], p[1]];
+            if !(uv[0].is_finite() && uv[1].is_finite()) {
+                return None;
+            }
+            if ring.last() != Some(&uv) {
+                ring.push(uv);
+            }
+        }
+        at = end;
+    }
+    if ring.len() > 1 && ring.first() == ring.last() {
+        ring.pop();
+    }
+    (ring.len() >= 3).then_some(ring)
+}
+
 /// The points of a mesh (type 40): `u32` count at 0xd0, then 28 bytes each from 0xd4 (x, y, z
 /// and a `u32`).
 pub fn mesh_points(r: &Record) -> Option<Vec<P3>> {
@@ -303,6 +467,48 @@ pub(crate) mod tests {
 
     fn rec(bytes: &[u8]) -> Record<'_> {
         Record { offset: 0, bytes }
+    }
+
+    #[test]
+    fn polyline_as_sample_113_with_an_arc_and_a_bezier_vertex() {
+        // corner, arc of radius 200, corner, Bezier control point, corner
+        let vertices = [([0.0, 0.0], 0u8, 0.0), ([1000.0, 0.0], 3, 200.0), ([1000.0, 800.0], 0, 0.0), ([500.0, 1200.0], 1, 0.0), ([0.0, 800.0], 0, 0.0)];
+        let mut b = record(kind::POLYLINE, 0x90 + 36 * vertices.len(), &[]);
+        b[0x8e] = vertices.len() as u8;
+        for (k, (at, kind, radius)) in vertices.iter().enumerate() {
+            let o = 0x90 + 36 * k;
+            b[o..o + 8].copy_from_slice(&f64::to_le_bytes(at[1]));
+            b[o + 8..o + 16].copy_from_slice(&f64::to_le_bytes(at[0]));
+            b[o + 16] = 0x80;
+            b[o + 17] = *kind;
+            b[o + 20..o + 28].copy_from_slice(&f64::to_le_bytes(*radius));
+        }
+        let o = outline(&rec(&b)).unwrap();
+        let has = |x: f64, y: f64| o.iter().any(|p| (p[0] - x).abs() < 1e-6 && (p[1] - y).abs() < 1e-6);
+        // the points Vectorworks has for it: the arc from (800, 0) to (1000, 200) about
+        // (800, 200), the curve from (1000, 800) over (500, 1000) to (0, 800)
+        assert!(has(0.0, 0.0) && has(800.0, 0.0) && has(1000.0, 200.0) && has(1000.0, 800.0) && has(500.0, 1000.0) && has(0.0, 800.0), "{o:?}");
+        assert!(!has(1000.0, 0.0) && !has(500.0, 1200.0));
+        let on_arc = o.iter().filter(|p| p[0] > 800.0 && p[1] < 200.0);
+        assert!(on_arc.clone().count() >= 5 && on_arc.clone().all(|p| ((p[0] - 800.0).hypot(p[1] - 200.0) - 200.0).abs() < 1e-9));
+        // an arc with radius 0 takes all the room there is: here the whole shorter side
+        let all = polyline_outline(&[Vertex { at: [0.0, 0.0], kind: 0, radius: 0.0 }, Vertex { at: [1000.0, 0.0], kind: 3, radius: 0.0 }, Vertex { at: [1000.0, 800.0], kind: 0, radius: 0.0 }]);
+        assert!(all.iter().any(|p| (p[0] - 200.0).abs() < 1e-6 && p[1].abs() < 1e-6) && all.iter().all(|p| (p[0] - 1000.0).abs() > 1e-6 || (p[1] - 800.0).abs() < 1e-6), "{all:?}");
+    }
+
+    #[test]
+    fn rounded_rectangle_as_sample_220() {
+        // 1000 x 500 with corners of diameter 200
+        let b = record(kind::ROUNDED_RECTANGLE, 204, &[(0xa4, 1.0), (0xac, 1000.0), (0xb4, 500.0), (0xbc, 200.0), (0xc4, 200.0)]);
+        let o = outline(&rec(&b)).unwrap();
+        let has = |x: f64, y: f64| o.iter().any(|p| (p[0] - x).abs() < 1e-6 && (p[1] - y).abs() < 1e-6);
+        // where Vectorworks' own points of it have the sides meet the corners
+        assert!(has(900.0, 500.0) && has(1000.0, 400.0) && has(1000.0, 100.0) && has(900.0, 0.0) && has(100.0, 0.0) && has(0.0, 100.0), "{o:?}");
+        assert!(!has(0.0, 0.0) && !has(1000.0, 500.0));
+        assert!(o.iter().filter(|p| p[0] > 900.0 && p[1] > 400.0).all(|p| ((p[0] - 900.0).hypot(p[1] - 400.0) - 100.0).abs() < 1e-9));
+        // without rounding it is the rectangle
+        let plain = record(kind::ROUNDED_RECTANGLE, 204, &[(0xa4, 1.0), (0xac, 1000.0), (0xb4, 500.0)]);
+        assert_eq!(outline(&rec(&plain)).unwrap().len(), 4);
     }
 
     #[test]

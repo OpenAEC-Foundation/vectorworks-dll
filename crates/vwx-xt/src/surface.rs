@@ -166,8 +166,13 @@ impl Surface {
             [closed("u_closed", "u_periodic"), closed("v_closed", "v_periodic")],
             v_first,
         )?;
+        Some(Surface { positive: n.positive(), ..Surface::of(Rc::new(nurbs)) })
+    }
+
+    /// The B-surface with definition `nurbs`.
+    pub fn of(nurbs: Rc<NurbsSurface>) -> Surface {
         let frame = Frame::new([0.0; 3], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]);
-        Some(Surface { kind: Kind::Nurbs, frame, positive: n.positive(), nurbs: Some(Rc::new(nurbs)), profile: None })
+        Surface { kind: Kind::Nurbs, frame, positive: true, nurbs: Some(nurbs), profile: None }
     }
 
     /// True for the surfaces whose parameters are searched from a guess, not solved.
