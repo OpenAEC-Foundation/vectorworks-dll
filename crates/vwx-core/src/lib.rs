@@ -1,8 +1,11 @@
 //! Container layer of the VWX reader.
 //!
-//! The container of a `.vwx` file is not decoded yet. Until it is, this crate holds the tools
-//! that decode it, all on plain bytes so they also run in the browser:
+//! Reads the container of a `.vwx` file and holds the tools the format is decoded with, all on
+//! plain bytes so they also run in the browser:
 //!
+//! - [`header`]: the versions that made and saved a file, and where its parts are;
+//! - [`container`]: the unpacked body, its records and their tree;
+//! - [`snappy`]: the compression of the body;
 //! - [`scan`]: compressed (zlib) streams, ASCII and UTF-16 strings, entropy per block;
 //! - [`probe`]: one summary of a file (known containers, streams, strings, entropy);
 //! - [`diff`]: the byte ranges in which two files differ, for files saved from Vectorworks
@@ -10,12 +13,16 @@
 //! - [`hex`]: hex dumps.
 
 mod error;
+pub mod container;
 pub mod diff;
+pub mod header;
 pub mod hex;
 pub mod probe;
 pub mod scan;
+pub mod snappy;
 
 pub use error::{Error, Result};
+pub use header::Header;
 pub use probe::{Container, Probe};
 
 /// Little-endian readers on a byte slice, `None` past its end.

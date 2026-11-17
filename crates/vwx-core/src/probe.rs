@@ -50,6 +50,8 @@ pub struct Probe {
     /// The first 64 bytes as text (`.` for bytes that do not print).
     pub head_text: String,
     pub container: Container,
+    /// The Vectorworks header, when the file starts with one.
+    pub header: Option<crate::Header>,
     /// Zlib streams of 16 bytes or more.
     pub streams: Vec<StreamInfo>,
     /// Bytes covered by the streams (compressed).
@@ -74,6 +76,7 @@ impl Probe {
             head: crate::hex::bytes(&data[..data.len().min(64)]),
             head_text: crate::hex::text(&data[..data.len().min(64)]),
             container: Container::of(data),
+            header: crate::Header::parse(data),
             stream_bytes: streams.iter().map(|s| s.compressed).sum(),
             streams: streams
                 .iter()

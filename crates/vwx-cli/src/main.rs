@@ -16,6 +16,10 @@ analysis:
                                             inside inflated stream n (see `streams`)
   vwx strings <file> [--min n] [--stream n] printable runs (ASCII, UTF-16 LE/BE) with offsets
   vwx streams <file> [--out dir]            zlib streams; --out writes each one inflated
+  vwx unpack <file> [--out body.bin] [--document doc.bin]
+                                            versions and sizes; writes the unpacked body
+  vwx records <file>                        records per object type
+  vwx tree <file> [--depth n] [--all]       the object tree (--all: with user data records)
   vwx diff <a> <b> [--gap n] [--streams]    byte ranges that differ, with both sides in hex and
                                             read as numbers; --streams: also inside the streams
                                             (pairwise by index)
@@ -39,7 +43,7 @@ fn positional(args: &[String]) -> Vec<&str> {
             skip = false;
         } else if let Some(name) = a.strip_prefix("--").or_else(|| a.strip_prefix('-').filter(|n| n.len() == 1)) {
             // options with a value
-            skip = matches!(name, "gap" | "stream" | "min" | "out" | "o");
+            skip = matches!(name, "gap" | "stream" | "min" | "out" | "o" | "depth" | "document");
         } else {
             out.push(a.as_str());
         }
@@ -121,9 +125,10 @@ fn survey(dir: &Path) -> Result<(), String> {
         let p = Probe::of(&data);
         let share = if data.is_empty() { 0 } else { p.stream_bytes * 100 / data.len() };
         println!(
-            "{:<40} {:>10}  {}  {:?}  {} streams ({share}% of file)",
+            "{:<40} {:>10}  {:<18} {}  {:?}  {} streams ({share}% of file)",
             path.file_name().unwrap_or_default().to_string_lossy(),
             data.len(),
+            p.header.as_ref().map_or("-".into(), |h| h.product()),
             hex::bytes(&data[..data.len().min(24)]),
             p.container,
             p.streams.len()
@@ -187,6 +192,51 @@ fn run(args: &[String]) -> Result<Option<Value>, String> {
                 if let Some(dir) = &out {
                     let name = dir.join(format!("{k:04}_{:08x}.bin", s.offset));
                     std::fs::write(&name, &s.data).map_err(|e| format!("{}: {e}", name.display()))?;
+                }
+            }
+            Ok(None)
+        }
+        "unpack" => {
+            let path = file()?;
+            let u = vwx_core::container::unpack(&read(path)?).map_err(|e| format!("{path}: {e}"))?;
+            let h = &u.header;
+            println!(
+                "{}: made with VW{}.{}.{}, saved by {} (VW{}.{}.{}, build {}); document header {} bytes; {} blocks, {} bytes unpacked",
+                path, h.created.major, h.created.minor, h.created.patch, h.product(), h.saved.major, h.saved.minor, h.saved.patch,
+                h.build, u.document.len(), u.blocks, u.body.len()
+            );
+            if let Some(out) = opt(args, "--out") {
+                std::fs::write(out, &u.body).map_err(|e| format!("{out}: {e}"))?;
+            }
+            if let Some(out) = opt(args, "--document") {
+                std::fs::write(out, &u.document).map_err(|e| format!("{out}: {e}"))?;
+            }
+            Ok(None)
+        }
+        "records" | "tree" => {
+            let path = file()?;
+            let u = vwx_core::container::unpack(&read(path)?).map_err(|e| format!("{path}: {e}"))?;
+            let recs = vwx_core::container::records(&u.body).map_err(|e| format!("{path}: {e}"))?;
+            if cmd == "records" {
+                let mut by_kind = std::collections::BTreeMap::<u8, (usize, usize, usize)>::new();
+                for r in &recs {
+                    let e = by_kind.entry(r.kind()).or_insert((0, usize::MAX, 0));
+                    *e = (e.0 + 1, e.1.min(r.bytes.len()), e.2.max(r.bytes.len()));
+                }
+                println!("{} records", recs.len());
+                for (kind, (n, min, max)) in by_kind {
+                    println!("{kind:>4} {:<28} {n:>7}  {min}..{max} bytes", vwx_read::kinds::name(kind));
+                }
+            } else {
+                let parents = vwx_core::container::parents(&recs);
+                let mut depth = vec![0usize; recs.len()];
+                let limit = opt(args, "--depth").map_or(Ok(usize::MAX), number)?;
+                for (i, r) in recs.iter().enumerate() {
+                    depth[i] = parents[i].map_or(0, |p| depth[p] + 1);
+                    // user data (type 76) fills the tree; shown only with --all
+                    if depth[i] <= limit && (r.kind() != 76 || flag(args, "--all")) {
+                        println!("{:indent$}{} {} (0x{:x}, {} bytes)", "", r.kind(), vwx_read::kinds::name(r.kind()), r.offset, r.bytes.len(), indent = depth[i] * 2);
+                    }
                 }
             }
             Ok(None)

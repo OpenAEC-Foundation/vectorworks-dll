@@ -16,8 +16,8 @@ One Rust library that opens a Vectorworks `.vwx` file without Vectorworks and
 
 Black-box only (see the clean-room rules in the README):
 
-1. **Survey.** `vwx survey` and `vwx probe` over files of several Vectorworks versions: header
-   bytes, byte order, version field, compressed streams, strings and their encoding, entropy.
+1. **Survey.** `vwx survey`, `vwx probe` and `vwx records` over the files a Vectorworks
+   installation ships with (the corpus: 787 files): header, compression, records, object types.
 2. **Controlled pairs.** Vectorworks saves a file, one thing changes, it saves again
    (`docs/ORACLE.md`). `vwx diff a b --streams` shows where the change lands: a coordinate shows
    up as a changed `f64`, a renamed layer as a changed string with its length field, a new object
@@ -31,9 +31,9 @@ Black-box only (see the clean-room rules in the README):
 
 | Layer | Status | Check |
 |---|---|---|
-| Analysis tools: probe, survey, scan (zlib streams, strings, entropy), diff, hex | **done** | unit tests |
-| Header: signature, version, byte order, units | not started | — |
-| Container: blocks / records, compression, object list | not started | — |
+| Analysis tools: probe, survey, scan (zlib streams, strings, entropy), diff, hex, unpack, records, tree | **done** | unit tests |
+| Header: versions (made with, saved by), lengths, build | **done** for files saved by VW 2023 and 2027; older headers recognised only | 787 corpus files |
+| Container: Snappy blocks, records, object types, object tree | **done** (`vwx_core::container`) | 787 of 787 corpus files open, 2.2 M objects, 26 s |
 | Document settings: units, origin, layer list, class list | not started | — |
 | 2D primitives: line, rectangle, polygon, polyline, arc, circle, text | not started | — |
 | 3D primitives: extrude, multiple extrude, sweep, 3D polygon, mesh, generic solid | not started | — |

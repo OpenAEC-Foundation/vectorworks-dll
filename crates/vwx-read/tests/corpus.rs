@@ -1,5 +1,6 @@
-//! Runs over the private sample set: every `.vwx` under `VWX_SAMPLES` must open without a
-//! panic, and once the container is decoded, without an error.
+//! Runs over the sample set: every `.vwx` and `.sta` under `VWX_SAMPLES` must open without an
+//! error. The Vectorworks installation itself is a good set (`C:\Program Files\Vectorworks
+//! 2027`: 787 files); the line printed at the end counts how many give meshes.
 //!
 //! ```text
 //! VWX_SAMPLES=C:\vwx-samples cargo test -p vwx-read --test corpus -- --ignored --nocapture
@@ -13,7 +14,7 @@ fn samples() -> Vec<PathBuf> {
             let path = entry.path();
             if path.is_dir() {
                 walk(&path, out);
-            } else if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("vwx")) {
+            } else if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("vwx") || e.eq_ignore_ascii_case("sta")) {
                 out.push(path);
             }
         }
@@ -31,20 +32,27 @@ fn samples() -> Vec<PathBuf> {
 fn every_sample_reads() {
     let files = samples();
     assert!(!files.is_empty(), "set VWX_SAMPLES to the folder of the sample files");
-    let mut failed = 0;
+    let (mut failed, mut with_meshes, mut objects, mut triangles) = (0, 0, 0usize, 0usize);
     for path in &files {
         let data = std::fs::read(path).unwrap();
-        match vwx_read::read(&data) {
-            Ok(scene) => {
-                let triangles: usize = scene.meshes.iter().map(|m| m.indices.len() / 3).sum();
-                println!("ok    {}  {} meshes, {triangles} triangles", path.display(), scene.meshes.len());
-            }
+        let doc = match vwx_read::open(&data) {
+            Ok(doc) => doc,
             Err(e) => {
                 failed += 1;
                 println!("FAIL  {}  {e}", path.display());
+                continue;
             }
-        }
+        };
+        objects += doc.objects.len();
+        let scene = vwx_read::mesh::scene(&doc);
+        let n: usize = scene.meshes.iter().map(|m| m.indices.len() / 3).sum();
+        triangles += n;
+        with_meshes += usize::from(n > 0);
     }
-    println!("{} of {} files read", files.len() - failed, files.len());
+    println!(
+        "{} of {} files open, {objects} objects; {with_meshes} files with meshes, {triangles} triangles",
+        files.len() - failed,
+        files.len()
+    );
     assert_eq!(failed, 0);
 }

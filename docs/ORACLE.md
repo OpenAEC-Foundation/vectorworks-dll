@@ -58,11 +58,17 @@ shows where that thing lives. Numbers stay fixed once samples exist; new steps g
 Units: millimetres, origin unchanged. One document is used throughout: the script clears it
 before each step, so no "new document" dialog is needed.
 
-## Script
+## Oracle server
 
-`tools/oracle/make_ladder.py` runs inside Vectorworks (Tools → Plug-ins → Run Script, Python).
-It is a **draft**: the calls are checked against the Function Reference of the installed
-version before its first run, and steps it cannot script yet are made by hand.
+Vectorworks runs scripts only from inside the application, so `tools/oracle/server.py` is started
+there once (Tools > Plug-ins > Run Script, from an empty document) and then waits for jobs:
+Python files dropped into `%VWX_SAMPLES%\jobs`. Each job runs with `vs` and a `job` helper
+(`job.step(name, draw, exports)` clears the document, draws, saves `name.vwx` and exports IFC
+and STL when asked), writes `<job>.log` and moves to `jobs\done`. A file named `stop` ends the
+server. Vectorworks does not respond while the server waits; that is expected.
 
-After a run, `vwx survey %VWX_SAMPLES%\ladder\<version>` gives the first table of
-`docs/FORMAT.md`, and `vwx diff 00_empty.vwx 01_empty_again.vwx --streams` the noise floor.
+The jobs that made the samples are kept in `tools/oracle/jobs/`, so a ladder can be made again
+with another Vectorworks version. `001_ladder.py` is the table above (numbering as in the job).
+
+After a run, `vwx diff a.vwx b.vwx` on the unpacked bodies (`vwx unpack --out`) shows what a
+step changed; `00_empty` against `01_empty_again` is the noise floor.
