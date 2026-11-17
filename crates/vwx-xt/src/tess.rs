@@ -13,9 +13,9 @@
 //!   searched from point to point along each loop;
 //! - a face of a **blend** (a rolling ball along an edge) likewise, by its spine and the two
 //!   surfaces the ball touches;
-//! - a face of an **offset surface** is not evaluated yet: its loops are filled
-//!   as if they lay in one plane, and counted as approximate. So is a face whose loops could
-//!   not be laid out in the parameters of its surface, with the reason.
+//! - a face of an **offset surface** likewise: its surface is another, moved along its normal;
+//! - a face whose loops cannot be laid out in the parameters of its surface: its loops are filled
+//!   as if they lay in one plane, and it is counted as approximate, with the reason.
 //!
 //! The loop direction has the face on its left seen from outside, so the outer loop of a face
 //! runs counter-clockwise about the face normal.
@@ -670,7 +670,7 @@ mod tests {
     }
 
     fn upright(kind: Kind) -> Surface {
-        Surface { kind, frame: Frame::new([0.0; 3], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]), positive: true, nurbs: None, profile: None }
+        Surface { kind, frame: Frame::new([0.0; 3], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]), positive: true, nurbs: None, profile: None, offset: 0.0 }
     }
 
     fn area(mesh: &Mesh) -> f64 {
@@ -755,7 +755,7 @@ mod tests {
     fn face_on_a_b_surface_follows_the_surface() {
         // the quarter cylinder (radius 1, height 2), bounded by its own four edges
         let n = std::rc::Rc::new(crate::nurbs::tests::quarter_cylinder());
-        let s = Surface { kind: Kind::Nurbs, frame: Frame::new([0.0; 3], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]), positive: true, nurbs: Some(n.clone()), profile: None };
+        let s = Surface { kind: Kind::Nurbs, frame: Frame::new([0.0; 3], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]), positive: true, nurbs: Some(n.clone()), profile: None, offset: 0.0 };
         let mut ring = Vec::new();
         for k in 0..8 {
             ring.push(n.eval(k as f64 / 8.0, 0.0));

@@ -28,6 +28,7 @@ const B_SURFACE: u16 = 124;
 const SWEPT_SURF: u16 = 67;
 const SPUN_SURF: u16 = 68;
 const BLENDED_EDGE: u16 = 56;
+const OFFSET_SURF: u16 = 60;
 /// How deep surfaces made from surfaces are followed (a blend on a blend).
 const MAX_DEPTH: usize = 3;
 use std::rc::Rc;
@@ -118,6 +119,9 @@ pub struct Surface {
     pub nurbs: Option<Rc<NurbsSurface>>,
     /// The curve of a swept or spun surface.
     pub profile: Option<Rc<Profile>>,
+    /// How far the surface lies from the one all the above describes, along its natural
+    /// normal: an offset surface. It has the parameters of that surface.
+    pub offset: f64,
 }
 
 impl Surface {
@@ -143,7 +147,7 @@ impl Surface {
                 let sweep = n.vector("sweep")?;
                 let profile = Profile::new(Path::load(file, n.ptr("section"))?)?;
                 let frame = Frame::new([0.0; 3], sweep, aside(sweep));
-                return Some(Surface { kind: Kind::Swept, frame, positive: n.positive(), nurbs: None, profile: Some(Rc::new(profile)) });
+                return Some(Surface { kind: Kind::Swept, frame, positive: n.positive(), nurbs: None, profile: Some(Rc::new(profile)), offset: 0.0 });
             }
             SPUN_SURF => {
                 let (base, axis) = (n.vector("base")?, n.vector("axis")?);
@@ -153,7 +157,15 @@ impl Surface {
                 profile.limits = ["start_param", "end_param"].map(|f| n.real(f).filter(|v| v.is_finite() && v.abs() < 1e12));
                 let radius = |p: P3| frame.local(p)[0].hypot(frame.local(p)[1]);
                 profile.radius = profile.samples.iter().map(|s| radius(s.1)).sum::<f64>() / profile.samples.len() as f64;
-                return Some(Surface { kind: Kind::Spun, frame, positive: n.positive(), nurbs: None, profile: Some(Rc::new(profile)) });
+                return Some(Surface { kind: Kind::Spun, frame, positive: n.positive(), nurbs: None, profile: Some(Rc::new(profile)), offset: 0.0 });
+            }
+            // the underlying surface, moved along its normal; with its sense
+            OFFSET_SURF if depth < MAX_DEPTH => {
+                let mut surface = Surface::load_within(file, n.ptr("surface"), depth + 1)?;
+                let offset = n.real("offset").filter(|d| d.is_finite())?;
+                surface.offset += if surface.positive { offset } else { -offset };
+                surface.positive = n.positive();
+                return Some(surface);
             }
             BLENDED_EDGE if depth < MAX_DEPTH => {
                 let supports: Vec<Surface> = n.many("surface").iter().filter_map(|v| if let Value::Ptr(p) = v { Surface::load_within(file, *p, depth + 1) } else { None }).collect();
@@ -167,7 +179,7 @@ impl Surface {
                 profile.supports = if radius > 0.0 { supports } else { Vec::new() };
                 profile.radius = radius;
                 let frame = Frame::new([0.0; 3], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]);
-                let mut surface = Surface { kind: Kind::Blend, frame, positive: n.positive(), nurbs: None, profile: Some(Rc::new(profile.clone())) };
+                let mut surface = Surface { kind: Kind::Blend, frame, positive: n.positive(), nurbs: None, profile: Some(Rc::new(profile.clone())), offset: 0.0 };
                 // the angle of the arc, for the steps across it
                 let middle = profile.samples[profile.samples.len() / 2].0;
                 profile.angle = surface.arc(&profile, middle).map_or(TAU / 4.0, |arc| arc.4).max(1e-3);
@@ -176,7 +188,7 @@ impl Surface {
             }
             _ => return None,
         };
-        Some(Surface { kind, frame, positive: n.positive(), nurbs: None, profile: None })
+        Some(Surface { kind, frame, positive: n.positive(), nurbs: None, profile: None, offset: 0.0 })
     }
 
     /// The B-surface of node `index` (a `B_SURFACE`). The reference does not say in which order
@@ -208,7 +220,7 @@ impl Surface {
     /// The B-surface with definition `nurbs`.
     pub fn of(nurbs: Rc<NurbsSurface>) -> Surface {
         let frame = Frame::new([0.0; 3], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]);
-        Surface { kind: Kind::Nurbs, frame, positive: true, nurbs: Some(nurbs), profile: None }
+        Surface { kind: Kind::Nurbs, frame, positive: true, nurbs: Some(nurbs), profile: None, offset: 0.0 }
     }
 
     /// True for the surfaces whose parameters are searched from a guess, not solved.
@@ -307,6 +319,15 @@ impl Surface {
     }
 
     pub fn eval(&self, u: f64, v: f64) -> P3 {
+        let p = self.eval_base(u, v);
+        if self.offset == 0.0 {
+            return p;
+        }
+        add(p, mul(self.normal(u, v), self.offset))
+    }
+
+    /// The point at (u, v) of the surface without its offset.
+    fn eval_base(&self, u: f64, v: f64) -> P3 {
         if let Some(n) = &self.nurbs {
             return n.eval(u, v);
         }
@@ -353,9 +374,9 @@ impl Surface {
         }
         if let Some(profile) = &self.profile {
             let h = profile.step * 1e-5;
-            let du = sub(self.eval(u + h, v), self.eval(u - h, v));
+            let du = sub(self.eval_base(u + h, v), self.eval_base(u - h, v));
             let dv = match self.kind {
-                Kind::Spun | Kind::Blend => sub(self.eval(u, v + 1e-6), self.eval(u, v - 1e-6)),
+                Kind::Spun | Kind::Blend => sub(self.eval_base(u, v + 1e-6), self.eval_base(u, v - 1e-6)),
                 _ => self.frame.z,
             };
             return unit(cross(du, dv));
@@ -389,7 +410,8 @@ impl Surface {
             Kind::Plane => [l[0], l[1]],
             Kind::Cylinder { .. } => [u, l[2]],
             Kind::Cone { .. } => [u, l[2]],
-            Kind::Sphere { radius } => [u, (l[2] / radius).clamp(-1.0, 1.0).asin()],
+            // (by angles, so that it also holds off the sphere: for an offset surface)
+            Kind::Sphere { .. } => [u, l[2].atan2(l[0].hypot(l[1]))],
             Kind::Torus { major, .. } => [u, l[2].atan2(l[0].hypot(l[1]) - major)],
             Kind::Nurbs | Kind::Swept | Kind::Spun | Kind::Blend => [0.0; 2],
         }
@@ -536,7 +558,7 @@ mod tests {
     fn all() -> Vec<Surface> {
         let frame = Frame::new([1.0, -2.0, 0.5], [0.0, 0.6, 0.8], [1.0, 0.0, 0.0]);
         [Kind::Plane, Kind::Cylinder { radius: 0.3 }, Kind::Cone { radius: 0.4, tan: 0.5 }, Kind::Sphere { radius: 0.7 }, Kind::Torus { major: 1.2, minor: 0.25 }]
-            .map(|kind| Surface { kind, frame, positive: true, nurbs: None, profile: None })
+            .map(|kind| Surface { kind, frame, positive: true, nurbs: None, profile: None, offset: 0.0 })
             .to_vec()
     }
 
@@ -564,7 +586,7 @@ mod tests {
     #[test]
     fn a_b_surface_is_evaluated_through_its_definition() {
         let n = crate::nurbs::tests::quarter_cylinder();
-        let s = Surface { kind: Kind::Nurbs, frame: all()[0].frame, positive: true, nurbs: Some(Rc::new(n)), profile: None };
+        let s = Surface { kind: Kind::Nurbs, frame: all()[0].frame, positive: true, nurbs: Some(Rc::new(n)), profile: None, offset: 0.0 };
         let p = s.eval(0.4, 0.5);
         assert!((p[0].hypot(p[1]) - 1.0).abs() < 1e-12 && (p[2] - 1.0).abs() < 1e-12);
         assert!(dot(s.normal(0.4, 0.5), [p[0], p[1], 0.0]) > 0.999);
@@ -583,7 +605,7 @@ mod tests {
             profile.limits = [Some(-1.0), None];
             profile.radius = 1.5;
         }
-        Surface { kind, frame: Frame::new([0.0; 3], z, aside(z)), positive: true, nurbs: None, profile: Some(Rc::new(profile)) }
+        Surface { kind, frame: Frame::new([0.0; 3], z, aside(z)), positive: true, nurbs: None, profile: Some(Rc::new(profile)), offset: 0.0 }
     }
 
     #[test]
@@ -615,12 +637,12 @@ mod tests {
     fn blend_between_two_planes() {
         // the floor z = 0 and the wall x = 0, a ball of radius 1 rolled along y in their corner:
         // its centre runs along the line through (1, 0, 1)
-        let plane = |normal: P3, x: P3| Surface { kind: Kind::Plane, frame: Frame::new([0.0; 3], normal, x), positive: true, nurbs: None, profile: None };
+        let plane = |normal: P3, x: P3| Surface { kind: Kind::Plane, frame: Frame::new([0.0; 3], normal, x), positive: true, nurbs: None, profile: None, offset: 0.0 };
         let mut profile = Profile::new(Path::Line { point: [1.0, 0.0, 1.0], direction: [0.0, 1.0, 0.0] }).unwrap();
         profile.supports = vec![plane([0.0, 0.0, 1.0], [1.0, 0.0, 0.0]), plane([1.0, 0.0, 0.0], [0.0, 1.0, 0.0])];
         profile.radius = 1.0;
         profile.angle = TAU / 4.0;
-        let blend = Surface { kind: Kind::Blend, frame: Frame::new([0.0; 3], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]), positive: true, nurbs: None, profile: Some(Rc::new(profile)) };
+        let blend = Surface { kind: Kind::Blend, frame: Frame::new([0.0; 3], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]), positive: true, nurbs: None, profile: Some(Rc::new(profile)), offset: 0.0 };
         // from the floor (v = 0) to the wall (v = 1), a quarter circle about the spine
         assert!(dist(blend.eval(2.0, 0.0), [1.0, 2.0, 0.0]) < 1e-12 && dist(blend.eval(2.0, 1.0), [0.0, 2.0, 1.0]) < 1e-12);
         let middle = blend.eval(0.5, 0.5);
@@ -631,6 +653,23 @@ mod tests {
             assert!(dot(blend.normal(u, v), numeric_normal(&blend, u, v)) > 1.0 - 1e-6);
         }
         assert_eq!((blend.period_u(), blend.period_v(), blend.curved_in_v()), (None, None, true));
+    }
+
+    #[test]
+    fn an_offset_surface_lies_along_the_normal() {
+        // a cylinder of radius 0.3 moved 0.2 outward is one of radius 0.5, with the same parameters
+        let mut s = all()[1].clone();
+        s.offset = 0.2;
+        let p = s.eval(1.0, 0.7);
+        let l = s.frame.local(p);
+        assert!((l[0].hypot(l[1]) - 0.5).abs() < 1e-12 && (l[2] - 0.7).abs() < 1e-12);
+        let [u, v] = s.invert(p);
+        assert!((u - 1.0).abs() < 1e-12 && (v - 0.7).abs() < 1e-12);
+        // and a sphere moved inward
+        let mut sphere = all()[3].clone();
+        sphere.offset = -0.2;
+        let [u, v] = sphere.invert(sphere.eval(0.4, 0.9));
+        assert!((u - 0.4).abs() < 1e-12 && (v - 0.9).abs() < 1e-12);
     }
 
     #[test]

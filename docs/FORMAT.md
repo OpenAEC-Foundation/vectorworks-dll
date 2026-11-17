@@ -325,8 +325,10 @@ neighbouring faces share the points of their common edge. Surfaces that are eval
 cylinder, cone, sphere, torus, B-surface (NURBS), swept surface (a curve moved along a
 direction), spun surface (a curve turned about an axis) and blend (a ball rolled along an edge:
 at each point of its spine, the path of the centre of the ball, a circular arc from where the
-ball touches the one supporting surface to where it touches the other). Offset surfaces are
-not: their faces are filled flat between their edges and counted as approximate.
+ball touches the one supporting surface to where it touches the other) and offset surface (a
+surface moved along its normal, with the parameters of that surface). A face whose loops cannot
+be laid out in the parameters of its surface is filled flat between its edges and counted as
+approximate.
 
 Of the 641 490 faces in the corpus (plane 84 %, cylinder 7 %, B-surface 3 %, swept 1 %, the
 others under 1 % each) 2 831 are filled flat (0.4 %): 199 on offset surfaces, 174 on blends, the
