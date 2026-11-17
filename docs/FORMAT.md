@@ -205,7 +205,7 @@ Every drawn object starts alike:
 | 85 mesh of a solid | | four `u32` at 0x8c: points, corner numbers, faces, edges; the points (x, y, z) from 0x9c, in the coordinates the solid is placed in; the corner numbers as `u32`, counted from 1; per face a `u32` count of corners and the `u32` position of its first corner number; per edge 16 bytes |
 | 113 NURBS surface | 0xb0 + 32 nu nv + 8 (ku + kv) | six `u32` at 0x98: control points along u and along v, knots of u and of v, degree along u and along v; from 0xb0 the control points, four `f64` each (x w, y w, z w, w), u running slowest; then the knots of u and those of v, written out in full. In the coordinates the object is placed in (the layer elevation is in the points). Its type 111 children are its boundaries (sample 122) |
 | 111 NURBS curve | | as a child of a NURBS surface: one boundary of it, in the parameters (u, v) of the surface. `u32` count of pieces at 0x8c; from 0x90 piece after piece around the boundary, each: `u32` control points, `u32` knots, `u32` degree, a `u32`; the control points, four `f64` each (u w, v w, 0, w); the knots (sample 122: four straight pieces around the unit square) |
-| 21 polyline | 0x90 + 36n | `u16` count at 0x8e; vertices of 36 bytes from 0x90: y, x, a `u32` whose second byte is the kind of vertex (0 corner, 1 Bezier, 3 arc), an `f64` radius, 8 bytes. A Bezier vertex is the control point of a quadratic curve, an arc vertex a corner rounded by a circle of that radius (0: as large as fits); a curve runs from and to a neighbouring corner, and half way to a neighbour that is a curve itself. As a profile its type 42 child has Vectorworks' own points of it (samples 111, 113) |
+| 21 polyline | 0x90 + 36n | `u16` count at 0x8e; vertices of 36 bytes from 0x90: y, x, a `u32` whose first byte is 0x80 when the side to the next vertex is drawn (a polyline with a hole runs to the hole and back along sides that are not) and whose second byte is the kind of vertex (0 corner, 1 Bezier, 2 cubic, 3 arc, 4 a point on an arc), an `f64` radius, 8 bytes. A Bezier vertex is the control point of a quadratic curve, an arc vertex a corner rounded by a circle of that radius (0: as large as fits); a curve runs from and to a neighbouring corner, and half way to a neighbour that is a curve itself. As a profile its type 42 child has Vectorworks' own points of it (samples 111, 113) |
 | 13 rounded rectangle | 204 | as the rectangle, then the width and height of the ellipse its corners are quarters of at 0xbc and 0xc4 (samples 112, 220) |
 | 68 wall | 2274+ | children: plan graphics (lines, polygons), a record, and a CSG solid with the wall's body |
 
@@ -253,8 +253,16 @@ The record ends with what the viewport shows: `u16` counts of layers and of clas
 0x358, then 8 bytes for each, the layers first: `u32` reference number, `i16` visibility (0
 visible, -1 invisible, 2 greyed), a `u16` (pairs 240 to 245; `Section-1` of the corpus project
 names its 9 design layers and 25 classes, the classes of spaces and fittings invisible). A new
-viewport names none and shows nothing. Its crop and the cut of a section viewport are not
-decoded.
+viewport names none and shows nothing.
+
+Among the children of a viewport are groups, each starting with a user data record that tags
+it: its crop (`porc`, a 2D shape on the sheet; the box of the viewport is that of its crop),
+its annotations, and what it keeps of the drawing it shows, as shapes in the millimetres of
+the view: a section viewport the outlines of what it cuts (`hcsc`, polygons and polylines with
+the records of the objects cut), the lines beyond the cut (`ncsp`) and the outline of the
+whole (`hcac`); an elevation the outline of what it shows. A point of the view lies on the
+sheet at the origin of the viewport plus the point divided by the scale. Where the cut of a
+section viewport lies in the model is not decoded.
 
 ### Dimensions: type 63
 

@@ -154,6 +154,13 @@ fn run(args: &[String]) -> Result<Option<Value>, String> {
         "read" => {
             let path = file()?;
             let scene = vwx_read::read(&read(path)?).map_err(|e| format!("{path}: {e}"))?;
+            // --sheet <number>: that sheet in full
+            if let Some(number) = opt(args, "--sheet") {
+                return match scene.sheets.iter().find(|s| s.number == number) {
+                    Some(sheet) => to(serde_json::to_value(sheet)),
+                    None => Err(format!("{path}: no sheet {number}")),
+                };
+            }
             // --props <text>: the properties of the objects that have that text in them
             if let Some(text) = opt(args, "--props") {
                 for props in scene.meshes.iter().flat_map(|m| &m.props).filter(|p| p.1.contains(text)) {

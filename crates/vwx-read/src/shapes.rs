@@ -163,32 +163,38 @@ pub struct Vertex {
     pub at: P2,
     pub kind: u8,
     pub radius: f64,
+    /// True when the side from this vertex to the next is drawn. A polyline with a hole runs
+    /// to the hole and back along sides that are not.
+    pub visible: bool,
 }
 
 /// The vertices of a polyline (type 21): `u16` count at 0x8e, then 36 bytes each from 0x90:
-/// the point (y, x), a `u32` whose second byte is the kind, the radius, 8 bytes.
+/// the point (y, x), a `u32` whose first byte is 0x80 when the side to the next vertex is
+/// drawn and whose second byte is the kind, the radius, 8 bytes.
 pub fn polyline(r: &Record) -> Option<Vec<Vertex>> {
     let count = le::u16(r.bytes, 0x8e)? as usize;
     (0..count)
         .map(|k| {
             let at = 0x90 + 36 * k;
-            Some(Vertex { at: yx(r, at)?, kind: *r.bytes.get(at + 17)?, radius: real(r, at + 20)? })
+            Some(Vertex { at: yx(r, at)?, kind: *r.bytes.get(at + 17)?, radius: real(r, at + 20)?, visible: r.bytes.get(at + 16)? & 0x80 != 0 })
         })
         .collect()
 }
 
-/// The closed outline through the vertices of a polyline, curves stepped.
+/// The points a polyline is drawn with at each of its vertices: the vertex itself, or the
+/// curve there.
 ///
 /// A curve at a vertex runs between its two neighbours: from and to a neighbour that is a
 /// corner, and half way to a neighbour that is a curve itself. A Bezier vertex is the control
 /// point of a quadratic curve between those two points; an arc vertex is rounded by a circle
 /// that touches both sides (sample 113: Vectorworks' own points of such a profile).
-pub fn polyline_outline(vertices: &[Vertex]) -> Vec<P2> {
+fn polyline_parts(vertices: &[Vertex]) -> Vec<Vec<P2>> {
     const BEZIER: u8 = 1;
     const ARC: u8 = 3;
     let n = vertices.len();
-    let mut out: Vec<P2> = Vec::new();
+    let mut parts: Vec<Vec<P2>> = Vec::new();
     for i in 0..n {
+        let mut out: Vec<P2> = Vec::new();
         let (previous, v, next) = (vertices[(i + n - 1) % n], vertices[i], vertices[(i + 1) % n]);
         let towards = |other: Vertex| if matches!(other.kind, BEZIER | ARC) { [(v.at[0] + other.at[0]) / 2.0, (v.at[1] + other.at[1]) / 2.0] } else { other.at };
         let (a, b) = (towards(previous), towards(next));
@@ -205,7 +211,7 @@ pub fn polyline_outline(vertices: &[Vertex]) -> Vec<P2> {
                 // half the angle between the two sides; no arc in a corner that is no corner
                 let half = cos.acos() / 2.0;
                 if half < 1e-6 || half > std::f64::consts::FRAC_PI_2 - 1e-6 {
-                    out.push(v.at);
+                    parts.push(vec![v.at]);
                     continue;
                 }
                 // the arc touches the sides at `reach` from the corner
@@ -230,12 +236,42 @@ pub fn polyline_outline(vertices: &[Vertex]) -> Vec<P2> {
             }
             _ => out.push(v.at),
         }
+        parts.push(out);
     }
+    parts
+}
+
+/// The closed outline through the vertices of a polyline, curves stepped.
+pub fn polyline_outline(vertices: &[Vertex]) -> Vec<P2> {
+    let mut out: Vec<P2> = polyline_parts(vertices).into_iter().flatten().collect();
     let near = |p: &P2, q: &P2| (p[0] - q[0]).abs() < 1e-9 && (p[1] - q[1]).abs() < 1e-9;
     out.dedup_by(|p, q| near(p, q));
     while out.len() > 1 && near(&out[0], &out[out.len() - 1]) {
         out.pop();
     }
+    out
+}
+
+/// The line segments a polyline is drawn with: its sides that are drawn, curves stepped, and
+/// with `closed` the side from its last vertex back to its first.
+pub fn polyline_segments(vertices: &[Vertex], closed: bool) -> Vec<[P2; 2]> {
+    let parts = polyline_parts(vertices);
+    let n = parts.len();
+    let mut out = Vec::new();
+    for i in 0..n {
+        let before = vertices[(i + n - 1) % n].visible;
+        // the curve at a vertex belongs to the two sides it rounds
+        if before && vertices[i].visible {
+            out.extend(parts[i].windows(2).map(|w| [w[0], w[1]]));
+        }
+        // the straight piece on to the next vertex
+        if vertices[i].visible && (i + 1 < n || closed) {
+            if let (Some(from), Some(to)) = (parts[i].last(), parts[(i + 1) % n].first()) {
+                out.push([*from, *to]);
+            }
+        }
+    }
+    out.retain(|[a, b]| (a[0] - b[0]).abs() > 1e-9 || (a[1] - b[1]).abs() > 1e-9);
     out
 }
 
@@ -666,7 +702,8 @@ pub(crate) mod tests {
         let on_arc = o.iter().filter(|p| p[0] > 800.0 && p[1] < 200.0);
         assert!(on_arc.clone().count() >= 5 && on_arc.clone().all(|p| ((p[0] - 800.0).hypot(p[1] - 200.0) - 200.0).abs() < 1e-9));
         // an arc with radius 0 takes all the room there is: here the whole shorter side
-        let all = polyline_outline(&[Vertex { at: [0.0, 0.0], kind: 0, radius: 0.0 }, Vertex { at: [1000.0, 0.0], kind: 3, radius: 0.0 }, Vertex { at: [1000.0, 800.0], kind: 0, radius: 0.0 }]);
+        let corner = |x: f64, y: f64, kind: u8, visible: bool| Vertex { at: [x, y], kind, radius: 0.0, visible };
+        let all = polyline_outline(&[corner(0.0, 0.0, 0, true), corner(1000.0, 0.0, 3, true), corner(1000.0, 800.0, 0, true)]);
         assert!(all.iter().any(|p| (p[0] - 200.0).abs() < 1e-6 && p[1].abs() < 1e-6) && all.iter().all(|p| (p[0] - 1000.0).abs() > 1e-6 || (p[1] - 800.0).abs() < 1e-6), "{all:?}");
     }
 
@@ -770,6 +807,30 @@ pub(crate) mod tests {
         // without rounding it is the rectangle
         let plain = record(kind::ROUNDED_RECTANGLE, 204, &[(0xa4, 1.0), (0xac, 1000.0), (0xb4, 500.0)]);
         assert_eq!(outline(&rec(&plain)).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn polyline_sides_that_are_not_drawn() {
+        // a square with a square hole, joined by a side there and back that is not drawn
+        let v = |x: f64, y: f64, visible: bool| Vertex { at: [x, y], kind: 0, radius: 0.0, visible };
+        let vertices = [
+            v(0.0, 0.0, true),
+            v(10.0, 0.0, true),
+            v(10.0, 10.0, true),
+            v(0.0, 10.0, true),
+            v(0.0, 0.0, false),
+            v(4.0, 4.0, true),
+            v(4.0, 6.0, true),
+            v(6.0, 6.0, true),
+            v(6.0, 4.0, true),
+            v(4.0, 4.0, false),
+        ];
+        let segments = polyline_segments(&vertices, true);
+        assert_eq!(segments.len(), 8);
+        assert!(!segments.iter().any(|[a, b]| (*a == [0.0, 0.0] && *b == [4.0, 4.0]) || (*a == [4.0, 4.0] && *b == [0.0, 0.0])));
+        // an open one of two points is its one side
+        assert_eq!(polyline_segments(&[v(0.0, 0.0, true), v(38.0, 0.0, false)], false), [[[0.0, 0.0], [38.0, 0.0]]]);
+        assert_eq!(polyline_segments(&[v(0.0, 0.0, true), v(38.0, 0.0, true)], false).len(), 1);
     }
 
     #[test]

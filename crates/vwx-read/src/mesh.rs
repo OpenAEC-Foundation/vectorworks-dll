@@ -165,6 +165,46 @@ fn texts_in(raw: &Raw, i: usize, place: &Affine, layer: &str, depth: usize, out:
     }
 }
 
+/// What a viewport keeps of the drawing it shows, as line segments on its sheet (metres): the
+/// groups among its children that hold shapes only (lines, polygons, polylines), in the
+/// millimetres of the view. A section viewport keeps the outlines of what it cuts (its group
+/// tagged `hcsc`), the lines beyond the cut (`ncsp`) and the outline of the whole (`hcac`); an
+/// elevation the outline of what it shows. A point of the view lies on the sheet at the
+/// viewport's origin plus the point divided by the scale (`Section-1` of the corpus project:
+/// its kept drawing, 8.6 m by 7.9 m at 1 : 50, fills the box of the viewport so placed).
+fn kept_drawing(raw: &Raw, viewport: usize, v: &shapes::Viewport) -> Vec<[[f32; 2]; 2]> {
+    let on_sheet = |p: P2| [((v.origin[0] + p[0] / v.scale) * SCALE) as f32, ((v.origin[1] + p[1] / v.scale) * SCALE) as f32];
+    let mut out = Vec::new();
+    for &group in raw.children[viewport].iter().filter(|&&g| raw.records[g].kind() == kind::GROUP) {
+        let shapes_of: Vec<usize> = raw.children[group].iter().copied().filter(|&c| !matches!(raw.records[c].kind(), kind::END | kind::USER_DATA | kind::RECORD | 101 | 125)).collect();
+        // (the group of its annotations holds objects of other kinds, laid out otherwise)
+        if shapes_of.is_empty() || !shapes_of.iter().all(|&c| matches!(raw.records[c].kind(), kind::LINE | kind::POLYGON | kind::POLYLINE | kind::RECTANGLE | kind::ARC | kind::OVAL)) {
+            continue;
+        }
+        for c in shapes_of {
+            let r = &raw.records[c];
+            if let Some(vertices) = (r.kind() == kind::POLYLINE).then(|| shapes::polyline(r)).flatten() {
+                // a polyline: its sides that are drawn (those to its holes are not)
+                out.extend(shapes::polyline_segments(&vertices, shapes::closed(r)).into_iter().filter(|s| s.iter().flatten().all(|c| c.is_finite())).map(|[a, b]| [on_sheet(a), on_sheet(b)]));
+                continue;
+            }
+            let points: Vec<P2> = match r.kind() {
+                kind::LINE => shapes::line(r).map(|l| l.to_vec()).unwrap_or_default(),
+                _ => shapes::outline(r).or_else(|| shapes::arc(r)).unwrap_or_default(),
+            };
+            let closed = r.kind() != kind::LINE && shapes::closed(r) && shapes::outline(r).is_some();
+            if points.len() < 2 || points.iter().flatten().any(|c| !c.is_finite()) {
+                continue;
+            }
+            out.extend(points.windows(2).map(|w| [on_sheet(w[0]), on_sheet(w[1])]));
+            if closed && points.len() > 2 {
+                out.push([on_sheet(points[points.len() - 1]), on_sheet(points[0])]);
+            }
+        }
+    }
+    out
+}
+
 /// The sheet layers of a document: what is drawn on each (lines, arcs, outlines; texts).
 fn sheets(raw: &Raw) -> Vec<vwx_model::Sheet> {
     let mut out = Vec::new();
@@ -192,6 +232,7 @@ fn sheets(raw: &Raw) -> Vec<vwx_model::Sheet> {
         let mut viewports = Vec::new();
         for &c in raw.children[i].iter().filter(|&&c| raw.records[c].kind() == kind::VIEWPORT) {
             let Some(v) = shapes::viewport(&raw.records[c]) else { continue };
+            lines.extend(kept_drawing(raw, c, &v));
             viewports.push(vwx_model::Viewport {
                 id: c as u64,
                 name: raw.name(c).unwrap_or_default().to_string(),
@@ -576,7 +617,15 @@ impl Builder<'_, '_> {
                     if shapes::filled(r, class) {
                         self.face(key, &world, color, place.mirrors());
                     } else if shapes::stroked(r, class) {
-                        self.stroke(key, &world, pen, shapes::closed(r));
+                        match (r.kind() == kind::POLYLINE).then(|| shapes::polyline(r)).flatten() {
+                            // a polyline: its sides that are drawn
+                            Some(vertices) => {
+                                for [a, b] in shapes::polyline_segments(&vertices, shapes::closed(r)) {
+                                    self.stroke(key, &[place.apply([a[0], a[1], z]), place.apply([b[0], b[1], z])], pen, false);
+                                }
+                            }
+                            None => self.stroke(key, &world, pen, shapes::closed(r)),
+                        }
                     }
                 } else if let Some(points) = (r.kind() == kind::ARC && shapes::stroked(r, class)).then(|| shapes::arc(r)).flatten() {
                     let world: Vec<P3> = points.iter().map(|p| place.apply([p[0], p[1], z])).collect();
@@ -1100,8 +1149,18 @@ mod tests {
             tagged(block, 2, 0, 0),
             tagged(text, 3, 0, 0),
             tagged(record(kind::END, 88, &[]), 3, 0, 0),
-            // a plan of 1 : 50 as the first of the corpus
-            tagged(record(kind::VIEWPORT, 1082, &[(0x68, 275.0), (0x70, -369.0), (0x78, 27.0), (0x80, 172.0), (0x23e, 1.0), (0x25e, 1.0), (0x27e, 1.0), (0x2e4, 50.0)]), 2, 77, 0),
+            // a plan of 1 : 50 as the first of the corpus, the origin of the model at (-200, 100)
+            tagged(
+                record(kind::VIEWPORT, 1082, &[(0x68, 275.0), (0x70, -369.0), (0x78, 27.0), (0x80, 172.0), (0xd4, -10000.0), (0xdc, 5000.0), (0x23e, 1.0), (0x25e, 1.0), (0x27e, 1.0), (0x2e4, 50.0)]),
+                2,
+                77,
+                0,
+            ),
+            // with a group that keeps a line of its drawing: 5 m long, in the millimetres of the view
+            tagged(record(kind::GROUP, 204, &[]), 4, 0, 0),
+            tagged(pen(record(kind::LINE, 140, &[(0x80, 5000.0)])), 5, 0, 0),
+            tagged(record(kind::END, 88, &[]), 5, 0, 0),
+            tagged(record(kind::END, 88, &[]), 4, 0, 0),
             tagged(record(kind::END, 88, &[]), 2, 0, 0),
         ];
         let u = unpacked(records);
@@ -1111,9 +1170,11 @@ mod tests {
         assert_eq!((sheet.number.as_str(), sheet.title.as_str()), ("001", "Plans"));
         let v = &sheet.viewports[0];
         assert_eq!((v.name.as_str(), v.min, v.max, v.scale, v.forward), ("GF Plan", [-0.369, 0.027], [0.172, 0.275], 50.0, [0.0, 0.0, -1.0]));
+        assert_eq!(v.origin, [-0.2, 0.1]);
         // it names no layers: it shows none of the design layers (here there are none)
         assert!(v.hidden_layers.is_empty() && v.hidden_classes.is_empty());
-        assert_eq!(sheet.lines, [[[0.0, 0.0], [0.42, 0.0]]]);
+        // its own line, and the line its viewport keeps: 100 mm long on the sheet, from the origin of the view
+        assert_eq!(sheet.lines, [[[0.0, 0.0], [0.42, 0.0]], [[-0.2, 0.1], [-0.1, 0.1]]]);
         // the text of the title block, where the block is
         assert_eq!((sheet.texts[0].text.as_str(), sheet.texts[0].at), ("Plans", [0.105, 0.06, 0.0]));
     }
