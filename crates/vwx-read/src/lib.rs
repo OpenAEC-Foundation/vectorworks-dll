@@ -31,6 +31,7 @@ pub mod resources;
 pub mod shapes;
 pub mod styles;
 pub mod tri;
+pub mod worksheet;
 
 pub use vwx_core::{Error, Result};
 pub use vwx_model as model;
@@ -137,6 +138,7 @@ pub fn read(data: &[u8]) -> Result<Scene> {
     scene.level_templates = settings.level_templates;
     scene.project = settings.project;
     scene.page = settings.page;
+    scene.worksheets = worksheet::read(&raw);
     Ok(scene)
 }
 

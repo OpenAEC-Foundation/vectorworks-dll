@@ -10,6 +10,7 @@ const USAGE: &str = "usage:
   vwx info <file.vwx>                       document facts
   vwx read <file.vwx> [--elements]          read the file; meshes and triangles per mesh
                                             (--plan <layer>, --sheet <n>: that one in full)
+                                            (--worksheets: the worksheets and their cells as JSON)
                                             (--elements: bounds and properties per object)
   vwx document <file.vwx>                   the neutral model as JSON
   vwx mesh <file.vwx> [--obj out.obj]       bounds and triangles of the meshes; writes an OBJ
@@ -174,6 +175,10 @@ fn run(args: &[String]) -> Result<Option<Value>, String> {
                     Some(sheet) => to(serde_json::to_value(sheet)),
                     None => Err(format!("{path}: no sheet {number}")),
                 };
+            }
+            // --worksheets: the worksheets with their cells, as JSON
+            if args.iter().any(|a| a == "--worksheets") {
+                return to(serde_json::to_value(&scene.worksheets));
             }
             // --elements: one line per object that is drawn: its id, bounds (metres), triangles,
             // mesh and properties
