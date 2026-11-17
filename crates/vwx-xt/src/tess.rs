@@ -484,6 +484,13 @@ fn curved(mesh: &mut Mesh, loops: &[Vec<P3>], s: &Surface, sign: f64) -> Result<
     } else {
         sign
     };
+    // A loop around the axis is cut open where it starts, and the cut runs across the face to
+    // the pole or to the other loop around: start them where no hole is in the way
+    if let Some(at) = seam(&plain, period) {
+        for (ring, turns) in &mut around {
+            start_at(ring, *turns, period, at);
+        }
+    }
     // the outside ring
     let outer = match around.len() {
         0 if !plain.is_empty() => {
@@ -532,6 +539,44 @@ fn curved(mesh: &mut Mesh, loops: &[Vec<P3>], s: &Surface, sign: f64) -> Result<
     }
 }
 
+/// Where in `u` (or the parameter that goes around) a cut across the face meets none of the
+/// `holes`: the middle of the widest gap between them. `None` without holes, or when they
+/// leave no gap.
+fn seam(holes: &[Ring], period: f64) -> Option<f64> {
+    let mut spans: Vec<(f64, f64)> = Vec::new();
+    for hole in holes {
+        let (lo, hi) = hole.corners.iter().fold((f64::MAX, f64::MIN), |(lo, hi), c| (lo.min(c.uv[0]), hi.max(c.uv[0])));
+        if !(hi - lo < period) {
+            return None;
+        }
+        let start = lo.rem_euclid(period);
+        spans.push((start, start + hi - lo));
+    }
+    spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+    // the gap after each span, up to the next one (the first, a period on, after the last)
+    let mut best: Option<(f64, f64)> = None;
+    let mut reach = spans.first()?.1;
+    for k in 0..spans.len() {
+        reach = reach.max(spans[k].1);
+        let next = spans.get(k + 1).map_or(spans[0].0 + period, |s| s.0);
+        if next > reach && best.is_none_or(|b| next - reach > b.0) {
+            best = Some((next - reach, (reach + next) / 2.0));
+        }
+    }
+    best.map(|b| b.1)
+}
+
+/// Turns a loop around the axis so that it starts at its point nearest to `at` in `u`.
+fn start_at(ring: &mut Ring, turns: i32, period: f64, at: f64) {
+    let Some(start) = (0..ring.corners.len()).min_by(|&i, &j| wrap(ring.corners[i].uv[0] - at, period).abs().total_cmp(&wrap(ring.corners[j].uv[0] - at, period).abs())) else {
+        return;
+    };
+    for c in &mut ring.corners[..start] {
+        c.uv[0] += turns as f64 * period;
+    }
+    ring.corners.rotate_left(start);
+}
+
 /// Closes a loop that goes around the axis: back to the first point a period on, then along the
 /// pole or apex.
 fn close_around(ring: &mut Ring, turns: i32, period: f64) {
@@ -557,11 +602,7 @@ fn band(s: &Surface, mut a: Ring, ta: i32, mut b: Ring, tb: i32, period: f64) ->
     close_around(&mut a, ta, period);
     let end = a.corners[a.corners.len() - 1].uv;
     // start the other loop where this one ends, so that the seam between them runs along v
-    let start = (0..b.corners.len()).min_by(|&i, &j| wrap(b.corners[i].uv[0] - end[0], period).abs().total_cmp(&wrap(b.corners[j].uv[0] - end[0], period).abs())).unwrap_or(0);
-    for c in &mut b.corners[..start] {
-        c.uv[0] += tb as f64 * period;
-    }
-    b.corners.rotate_left(start);
+    start_at(&mut b, tb, period, end[0]);
     b.shift_u(period * ((end[0] - b.corners[0].uv[0]) / period).round());
     close_around(&mut b, tb, period);
     // the two seams, stepped where the surface bends along v
@@ -624,10 +665,20 @@ fn triangulate(mesh: &mut Mesh, rings: &[Ring], s: &Surface, sign: f64, swap: bo
     use spade::{ConstrainedDelaunayTriangulation, Point2, Triangulation};
     let count: usize = rings.iter().map(|r| r.corners.len()).sum();
     if count < 3 {
-        return false;
+        {
+            if std::env::var("XTDBG").is_ok() {
+                eprintln!("T few");
+            }
+            return false;
+        }
     }
     if rings.iter().flat_map(|r| &r.corners).any(|c| !c.uv[0].is_finite() || !c.uv[1].is_finite()) {
-        return false;
+        {
+            if std::env::var("XTDBG").is_ok() {
+                eprintln!("T nan");
+            }
+            return false;
+        }
     }
     let uv_of = |ab: P2| if swap { [ab[1], ab[0]] } else { ab };
     let mean_v = rings.iter().flat_map(|r| &r.corners).map(|c| uv_of(c.uv)[1]).sum::<f64>() / count as f64;
@@ -650,13 +701,25 @@ fn triangulate(mesh: &mut Mesh, rings: &[Ring], s: &Surface, sign: f64, swap: bo
     };
     for ring in rings {
         let handles: Option<Vec<_>> = ring.corners.iter().map(|c| insert(&mut cdt, &mut corners, *c)).collect();
-        let Some(handles) = handles else { return false };
+        let Some(handles) = handles else {
+            {
+                if std::env::var("XTDBG").is_ok() {
+                    eprintln!("T insert");
+                }
+                return false;
+            }
+        };
         for i in 0..handles.len() {
             let (a, b) = (handles[i], handles[(i + 1) % handles.len()]);
             if a != b {
                 // rings that cross (damaged data) cannot both be kept
                 if !cdt.can_add_constraint(a, b) {
-                    return false;
+                    {
+                        if std::env::var("XTDBG").is_ok() {
+                            eprintln!("T constraint {:?} {:?}", corners[a.index()].uv, corners[b.index()].uv);
+                        }
+                        return false;
+                    }
                 }
                 cdt.add_constraint(a, b);
             }

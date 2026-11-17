@@ -130,7 +130,7 @@ impl Surface {
         Surface::load_within(file, index, 0)
     }
 
-    fn load_within(file: &File, index: u32, depth: usize) -> Option<Surface> {
+    pub(crate) fn load_within(file: &File, index: u32, depth: usize) -> Option<Surface> {
         let n = file.node(index)?;
         let axes = |origin: &str, axis: &str| Some(Frame::new(n.vector(origin)?, n.vector(axis)?, n.vector("x_axis")?));
         let (kind, frame) = match n.code() {
@@ -145,14 +145,14 @@ impl Surface {
             B_SURFACE => return Surface::load_nurbs(file, index, false),
             SWEPT_SURF => {
                 let sweep = n.vector("sweep")?;
-                let profile = Profile::new(Path::load(file, n.ptr("section"))?)?;
+                let profile = Profile::new(Path::load_within(file, n.ptr("section"), depth)?)?;
                 let frame = Frame::new([0.0; 3], sweep, aside(sweep));
                 return Some(Surface { kind: Kind::Swept, frame, positive: n.positive(), nurbs: None, profile: Some(Rc::new(profile)), offset: 0.0 });
             }
             SPUN_SURF => {
                 let (base, axis) = (n.vector("base")?, n.vector("axis")?);
                 let frame = Frame::new(base, axis, aside(axis));
-                let mut profile = Profile::new(Path::load(file, n.ptr("profile"))?)?;
+                let mut profile = Profile::new(Path::load_within(file, n.ptr("profile"), depth)?)?;
                 // a null parameter (-3.14158e13) is no limit
                 profile.limits = ["start_param", "end_param"].map(|f| n.real(f).filter(|v| v.is_finite() && v.abs() < 1e12));
                 let radius = |p: P3| frame.local(p)[0].hypot(frame.local(p)[1]);
@@ -175,7 +175,7 @@ impl Surface {
                 if !radius.is_finite() || (radius > 0.0 && supports.len() != 2) {
                     return None;
                 }
-                let mut profile = Profile::new(Path::load(file, n.ptr("spine"))?)?;
+                let mut profile = Profile::new(Path::load_within(file, n.ptr("spine"), depth)?)?;
                 profile.supports = if radius > 0.0 { supports } else { Vec::new() };
                 profile.radius = radius;
                 let frame = Frame::new([0.0; 3], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]);

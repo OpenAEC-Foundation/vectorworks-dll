@@ -201,11 +201,21 @@ pub enum Path {
     /// The points an intersection curve comes with (its chart), straight between them; the
     /// parameter is the number of the point.
     Chain(Vec<P3>),
+    /// An intersection curve through points on both its surfaces, close enough together that a
+    /// cubic between two of them with the tangents of the curve there stays on the curve: the
+    /// points and the unit tangents. The parameter is the number of the point.
+    Smooth(Vec<P3>, Vec<P3>),
 }
 
 impl Path {
     /// The curve of node `curve`; `None` for the kinds that have no parameter here.
     pub fn load(file: &File, curve: u32) -> Option<Path> {
+        Path::load_within(file, curve, 0)
+    }
+
+    /// As [`Path::load`], for the curve of a surface `depth` deep in surfaces made from
+    /// surfaces.
+    pub(crate) fn load_within(file: &File, curve: u32, depth: usize) -> Option<Path> {
         let mut n = file.node(curve)?;
         for _ in 0..8 {
             if n.code() != TRIMMED_CURVE {
@@ -226,9 +236,51 @@ impl Path {
             INTERSECTION => {
                 let mut points: Vec<P3> = file.node(n.ptr("chart"))?.many("Hvec").iter().filter_map(vector).filter(|p| p.iter().all(|c| c.is_finite())).collect();
                 points.dedup();
-                (points.len() >= 2).then_some(Path::Chain(points))
+                if points.len() < 2 {
+                    return None;
+                }
+                // the chart is only an approximation (of a blend's spine, chords that are a tenth
+                // of the radius of the ball off the curve): points on both surfaces between
+                let surfaces: Vec<Surface> = n.many("surface").iter().filter_map(|v| if let Value::Ptr(p) = v { Surface::load_within(file, *p, depth + 1) } else { None }).collect();
+                let mut path = match surfaces.as_slice() {
+                    [a, b] if std::env::var("XTNOREFINE").is_err() => refine(&points, [a, b]).map_or(Path::Chain(points), |(points, tangents)| Path::Smooth(points, tangents)),
+                    _ => Path::Chain(points),
+                };
+                // an end at a terminator (where the surfaces touch) lies just beyond the chart:
+                // the first point of the limit
+                for (field, at_start) in [("start", true), ("end", false)] {
+                    let Some(limit) = file.node(n.ptr(field)).filter(|l| l.int("type") == Some(i64::from(b'T'))) else { continue };
+                    if let Some(end) = limit.many("hvec").first().and_then(vector).filter(|p| p.iter().all(|c| c.is_finite())) {
+                        path.extend(end, at_start);
+                    }
+                }
+                Some(path)
             }
             _ => None,
+        }
+    }
+
+    /// A chain or smooth chain with one more point at its start or its end, the tangent there
+    /// along the last piece.
+    fn extend(&mut self, p: P3, at_start: bool) {
+        let (Path::Chain(points) | Path::Smooth(points, _)) = self else { return };
+        let next = if at_start { points[0] } else { points[points.len() - 1] };
+        if dist(p, next) <= 1e-12 * (1.0 + dist(points[0], points[points.len() - 1])) {
+            return;
+        }
+        let tangent = crate::geom::unit(if at_start { sub(next, p) } else { sub(p, next) });
+        if let Path::Smooth(_, tangents) = self {
+            if at_start {
+                tangents.insert(0, tangent);
+            } else {
+                tangents.push(tangent);
+            }
+        }
+        let (Path::Chain(points) | Path::Smooth(points, _)) = self else { return };
+        if at_start {
+            points.insert(0, p);
+        } else {
+            points.push(p);
         }
     }
 
@@ -245,6 +297,21 @@ impl Path {
                 let i = (t.floor().max(0.0) as usize).min(points.len() - 2);
                 lerp(points[i], points[i + 1], t - i as f64)
             }
+            Path::Smooth(points, tangents) => {
+                let i = (t.floor().max(0.0) as usize).min(points.len() - 2);
+                let s = t - i as f64;
+                let (a, b) = (points[i], points[i + 1]);
+                let l = dist(a, b);
+                if !(0.0..=1.0).contains(&s) {
+                    // beyond its ends it goes on straight
+                    let (from, tangent, by) = if s < 0.0 { (a, tangents[i], s) } else { (b, tangents[i + 1], s - 1.0) };
+                    return add(from, mul(tangent, l * by));
+                }
+                // the cubic Hermite curve
+                let (s2, s3) = (s * s, s * s * s);
+                let h = [2.0 * s3 - 3.0 * s2 + 1.0, (s3 - 2.0 * s2 + s) * l, -2.0 * s3 + 3.0 * s2, (s3 - s2) * l];
+                add(add(mul(a, h[0]), mul(tangents[i], h[1])), add(mul(b, h[2]), mul(tangents[i + 1], h[3])))
+            }
         }
     }
 
@@ -254,7 +321,7 @@ impl Path {
             Path::Line { .. } => None,
             Path::Conic { .. } => Some((0.0, TAU)),
             Path::Spline(nurbs) => nurbs.range(),
-            Path::Chain(points) => Some((0.0, (points.len() - 1) as f64)),
+            Path::Chain(points) | Path::Smooth(points, _) => Some((0.0, (points.len() - 1) as f64)),
         }
     }
 
@@ -271,9 +338,96 @@ impl Path {
             Path::Line { .. } => vec![0.0, 1.0],
             Path::Conic { .. } => (0..=32).map(|k| ARC_STEP * k as f64).collect(),
             Path::Spline(nurbs) => nurbs.parameters(),
-            Path::Chain(points) => (0..points.len()).map(|k| k as f64).collect(),
+            Path::Chain(points) | Path::Smooth(points, _) => (0..points.len()).map(|k| k as f64).collect(),
         }
     }
+}
+
+/// Points of the intersection of surfaces `s` through and between the points of its chart, with
+/// the unit tangent of the curve at each; `None` when a point cannot be found.
+///
+/// A point between two chart points is, as the reference defines it, where the two surfaces
+/// meet the plane square to the chord through the point on the chord. It is searched by
+/// Newton's method: the point where the tangent planes of the surfaces at their points nearest
+/// to a guess meet that plane is the next guess. The chords are cut so that the curve turns at
+/// most [`ARC_STEP`] / 2 along each piece.
+fn refine(chart: &[P3], s: [&Surface; 2]) -> Option<(Vec<P3>, Vec<P3>)> {
+    use crate::geom::{cross, dot, len, unit};
+    let size = chart.iter().map(|p| dist(*p, chart[0])).fold(0.0, f64::max).max(1e-12);
+    // a point on both surfaces near `q`, in the plane through `q` square to `d`; with the
+    // tangent of the curve there (along `d`) and the parameters of the point on the surfaces
+    let solve = |q: P3, d: P3, guess: [Option<[f64; 2]>; 2]| -> Option<(P3, P3, [Option<[f64; 2]>; 2])> {
+        let d = unit(d);
+        let mut x = q;
+        let mut uv = guess;
+        let mut normals = [[0.0; 3]; 2];
+        for _ in 0..24 {
+            let mut at = [0.0; 2];
+            for k in 0..2 {
+                let found = match uv[k] {
+                    Some(g) => s[k].invert_near(x, g),
+                    None => s[k].invert(x),
+                };
+                uv[k] = Some(found);
+                normals[k] = s[k].normal(found[0], found[1]);
+                at[k] = dot(normals[k], s[k].eval(found[0], found[1]));
+            }
+            // the three planes meet at one point (Cramer)
+            let [n1, n2] = normals;
+            let det = dot(n1, cross(n2, d));
+            if !(det.abs() > 1e-9) {
+                if std::env::var("XTDBG").is_ok() {
+                    eprintln!("det {det} {:?} {:?}", s[0].kind, s[1].kind);
+                }
+                return None;
+            }
+            let next = mul(add(add(mul(cross(n2, d), at[0]), mul(cross(d, n1), at[1])), mul(cross(n1, n2), dot(d, q))), 1.0 / det);
+            let moved = dist(next, x);
+            x = next;
+            if moved <= 1e-13 * size {
+                break;
+            }
+        }
+        // on both surfaces
+        for k in 0..2 {
+            let found = s[k].invert_near(x, uv[k]?);
+            if dist(s[k].eval(found[0], found[1]), x) > 1e-6 * size {
+                if std::env::var("XTDBG").is_ok() {
+                    eprintln!("miss {k} {} size {size} {:?} {:?}", dist(s[k].eval(found[0], found[1]), x), s[0].kind, s[1].kind);
+                }
+                return None;
+            }
+        }
+        let t = cross(normals[0], normals[1]);
+        let t = if len(t) > 1e-6 { unit(t) } else { d };
+        Some((x, if dot(t, d) < 0.0 { mul(t, -1.0) } else { t }, uv))
+    };
+    let mut points = Vec::new();
+    let mut tangents = Vec::new();
+    let mut guess = [None, None];
+    for i in 0..chart.len() - 1 {
+        let (a, b) = (chart[i], chart[i + 1]);
+        let chord = sub(b, a);
+        // the chart points themselves, with their tangents
+        let (pa, ta, ga) = solve(a, chord, guess)?;
+        let (_, tb, _) = solve(b, chord, ga)?;
+        let turn = dot(ta, tb).clamp(-1.0, 1.0).acos();
+        let pieces = ((turn / (ARC_STEP / 2.0)).ceil() as usize).clamp(1, 64);
+        points.push(pa);
+        tangents.push(ta);
+        guess = ga;
+        for k in 1..pieces {
+            let (p, t, g) = solve(lerp(a, b, k as f64 / pieces as f64), chord, guess)?;
+            points.push(p);
+            tangents.push(t);
+            guess = g;
+        }
+    }
+    let last = chart[chart.len() - 1];
+    let (p, t, _) = solve(last, sub(last, chart[chart.len() - 2]), guess)?;
+    points.push(p);
+    tangents.push(t);
+    Some((points, tangents))
 }
 
 /// A B-spline (NURBS) curve as the reference stores it.
