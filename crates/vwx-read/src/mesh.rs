@@ -33,6 +33,36 @@ const SCALE: f64 = 0.001;
 /// Deepest nesting of symbols in symbols that is followed (a definition that places itself
 /// would never end).
 const MAX_DEPTH: usize = 24;
+/// The kind of building part a plug-in object is, by the name of its plug-in (English names,
+/// as files have them whatever the language of Vectorworks).
+fn plug_in_category(name: &str) -> &'static str {
+    let lower = name.to_lowercase();
+    let has = |words: &[&str]| words.iter().any(|w| lower.contains(w));
+    if has(&["door"]) {
+        "door"
+    } else if has(&["window"]) {
+        "window"
+    } else if has(&["stair"]) {
+        "stair"
+    } else if has(&["slab"]) {
+        "slab"
+    } else if has(&["roof"]) {
+        "roof"
+    } else if has(&["space"]) {
+        "space"
+    } else if has(&["column", "pilaster"]) {
+        "column"
+    } else if has(&["structuralmember", "framing member", "beam"]) {
+        "beam"
+    } else if has(&["railing", "handrail", "fence"]) {
+        "railing"
+    } else {
+        "plug-in object"
+    }
+}
+
+/// Most fields of a record whose values are shown with its object.
+const MAX_RECORD_FIELDS: usize = 64;
 /// Fill of objects whose colour is not known.
 const DEFAULT_COLOR: [u8; 3] = [200, 200, 204];
 
@@ -46,15 +76,28 @@ pub fn scene(raw: &Raw, info: Info) -> Scene {
         // 3D objects hold their height in the document; 2D shapes lie on their layer
         builder.elevation = raw::layer_elevation(r.bytes);
         for &child in &raw.children[i] {
+            // what is set into a wall (a door, a window, a symbol) is an object of its own, in
+            // its own class; the rest of what the wall holds is the wall
+            let inserts: Vec<usize> = if raw.records[child].kind() == kind::WALL {
+                raw.children[child].iter().copied().filter(|&c| matches!(raw.records[c].kind(), kind::PLUG_IN_OBJECT | kind::SYMBOL)).collect()
+            } else {
+                Vec::new()
+            };
             let key = (i, raw.records[child].class_id());
             let start = builder.batch(key).mesh.indices.len() as u32;
-            builder.walk(child, &Affine::IDENTITY, false, key, 0);
-            let count = builder.batch(key).mesh.indices.len() as u32 - start;
-            if count > 0 {
-                let props = builder.props(child, i);
-                let mesh = &mut builder.batch(key).mesh;
-                mesh.elements.push((child as u64, start, count));
-                mesh.props.push((child as u64, props));
+            if inserts.is_empty() {
+                builder.walk(child, &Affine::IDENTITY, false, key, 0);
+            } else {
+                for &part in raw.children[child].iter().filter(|c| !inserts.contains(c)) {
+                    builder.walk(part, &Affine::IDENTITY, true, key, 1);
+                }
+            }
+            builder.element(child, i, key, start);
+            for insert in inserts {
+                let key = (i, raw.records[insert].class_id());
+                let start = builder.batch(key).mesh.indices.len() as u32;
+                builder.walk(insert, &Affine::IDENTITY, true, key, 1);
+                builder.element(insert, i, key, start);
             }
         }
     }
@@ -201,6 +244,18 @@ impl Builder<'_, '_> {
         }
     }
 
+    /// Makes what was drawn in batch `key` since index `start` the pickable object `i` of
+    /// layer `layer`, with its properties.
+    fn element(&mut self, i: usize, layer: usize, key: (usize, u32), start: u32) {
+        let count = self.batch(key).mesh.indices.len() as u32 - start;
+        if count > 0 {
+            let props = self.props(i, layer);
+            let mesh = &mut self.batch(key).mesh;
+            mesh.elements.push((i as u64, start, count));
+            mesh.props.push((i as u64, props));
+        }
+    }
+
     /// The properties of an object as a flat JSON object.
     fn props(&self, i: usize, layer: usize) -> String {
         let r = &self.raw.records[i];
@@ -218,6 +273,35 @@ impl Builder<'_, '_> {
         if r.kind() == kind::SYMBOL {
             if let Some(symbol) = shapes::instance(r).and_then(|s| self.raw.names.get(&s.definition)) {
                 map.insert("Symbol".into(), symbol.clone().into());
+            }
+        }
+        // what a plug-in object is, by the name of its plug-in
+        if r.kind() == kind::PLUG_IN_OBJECT {
+            if let Some(name) = crate::records::plug_in(self.raw, i) {
+                map.insert("Object".into(), name.clone().into());
+                map.insert("category".into(), plug_in_category(name).into());
+            }
+        }
+        // the records attached to it, each value under the name of its record and field
+        for (record, values) in crate::records::of_object(self.raw, i) {
+            // the IFC entity Vectorworks exports it as
+            if let Some(entity) = crate::records::ifc_entity(&record) {
+                map.entry("IFC").or_insert_with(|| entity.into());
+            }
+            let record = crate::records::label(&record);
+            // (a record of hundreds of fields is the settings of a plug-in object, not data)
+            if values.len() > MAX_RECORD_FIELDS {
+                continue;
+            }
+            for (field, value) in crate::records::pairs(&values) {
+                let value = match value {
+                    crate::records::Value::Integer(v) => v.into(),
+                    crate::records::Value::Boolean(v) => v.into(),
+                    crate::records::Value::Number(v) => v.into(),
+                    crate::records::Value::Text(v) if v.is_empty() => continue,
+                    crate::records::Value::Text(v) => v.into(),
+                };
+                map.insert(format!("{record}.{field}"), value);
             }
         }
         serde_json::Value::Object(map).to_string()
@@ -680,6 +764,24 @@ mod tests {
         let (lo, hi) = bounds(m);
         assert_eq!((lo[0], hi[0], hi[1], lo[2], hi[2]), (0.0, 1.0, 0.0, 0.0, 3.0));
         assert!((lo[1] + 1.1).abs() < 1e-6, "{lo:?}");
+    }
+
+    #[test]
+    fn records_of_an_object_are_among_its_properties() {
+        // a rectangle with the record of sample 90 attached: format 41, "Gegevens", field "Naam"
+        let rect = record(kind::RECTANGLE, 188, &[(0xa4, 1.0), (0xac, 1000.0), (0xb4, 500.0)]);
+        let records = vec![
+            tagged(names(&[(41, "Gegevens")]), 1, 0, 0),
+            tagged(crate::records::tests::format_record(&[("Naam", 4, 0)]), 1, 41, 0),
+            tagged(layer("L", 0.0), 1, 1, 0),
+            tagged(rect, 2, 0, 0),
+            tagged(crate::records::tests::sample_90(), 3, 0, 0),
+            tagged(record(kind::END, 88, &[]), 3, 0, 0),
+            tagged(record(kind::END, 88, &[]), 2, 0, 0),
+        ];
+        let u = unpacked(records);
+        let scene = scene(&Raw::new(&u).unwrap(), Info::default());
+        assert!(scene.meshes[0].props[0].1.contains(r#""Gegevens.Naam":"Balk-1""#), "{}", scene.meshes[0].props[0].1);
     }
 
     #[test]

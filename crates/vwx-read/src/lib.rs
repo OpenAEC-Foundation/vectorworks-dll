@@ -22,6 +22,7 @@ pub mod kinds;
 pub mod mesh;
 pub mod palette;
 pub mod raw;
+pub mod records;
 pub mod shapes;
 pub mod tri;
 

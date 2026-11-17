@@ -26,11 +26,14 @@ pub mod kind {
     /// The points Vectorworks worked out for a profile inside a 3D object.
     pub const PROFILE_GRID: u8 = 42;
     pub const VIEW: u8 = 43;
+    pub const RECORD_FORMAT: u8 = 47;
+    pub const RECORD: u8 = 48;
     pub const SAVED_VIEW: u8 = 49;
     pub const NAMES: u8 = 55;
     pub const USER_DATA: u8 = 76;
     pub const SWEEP: u8 = 34;
     pub const MULTIPLE_EXTRUDE: u8 = 38;
+    pub const WALL: u8 = 68;
     pub const CSG_SOLID: u8 = 84;
     pub const NURBS_CURVE: u8 = 111;
     pub const NURBS_SURFACE: u8 = 113;
@@ -38,6 +41,7 @@ pub mod kind {
     pub const BODY: u8 = 114;
     /// The mesh of a primitive solid, a child of it.
     pub const POLY_MESH: u8 = 85;
+    pub const PLUG_IN_OBJECT: u8 = 86;
     pub const CLASS: u8 = 94;
     /// A primitive solid: sphere, hemisphere, cone.
     pub const SOLID: u8 = 95;

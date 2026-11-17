@@ -154,6 +154,13 @@ fn run(args: &[String]) -> Result<Option<Value>, String> {
         "read" => {
             let path = file()?;
             let scene = vwx_read::read(&read(path)?).map_err(|e| format!("{path}: {e}"))?;
+            // --props <text>: the properties of the objects that have that text in them
+            if let Some(text) = opt(args, "--props") {
+                for props in scene.meshes.iter().flat_map(|m| &m.props).filter(|p| p.1.contains(text)) {
+                    println!("{}", props.1);
+                }
+                return Ok(None);
+            }
             Ok(Some(json!({
                 "info": scene.info,
                 "meshes": scene.meshes.iter().map(|m| json!({
