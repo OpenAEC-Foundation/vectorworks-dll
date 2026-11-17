@@ -119,6 +119,23 @@ pub struct Scene {
     pub views: Vec<View>,
     /// The texts on the design layers.
     pub texts: Vec<Text>,
+    /// The sheet layers: the drawing sheets of the document.
+    pub sheets: Vec<Sheet>,
+}
+
+/// A sheet layer: what is drawn on the paper itself (its title block, notes), in metres on
+/// paper, x right and y up. The views of the model it shows (its viewports) are not read yet.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Sheet {
+    pub id: u64,
+    /// The name of the layer, by custom the number of the sheet.
+    pub number: String,
+    pub title: String,
+    /// Line segments, each from one point to another.
+    pub lines: Vec<[[f32; 2]; 2]>,
+    pub texts: Vec<Text>,
+    /// How many viewports it has.
+    pub viewports: usize,
 }
 
 /// A text of the document (metres, Z up).

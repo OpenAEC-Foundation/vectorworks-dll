@@ -114,31 +114,79 @@ pub fn scene(raw: &Raw, info: Info) -> Scene {
     if meshes.iter().all(|m| m.hidden) {
         meshes.iter_mut().for_each(|m| m.hidden = false);
     }
-    Scene { info, meshes, views: views(raw), texts: texts(raw) }
+    Scene { info, meshes, views: views(raw), texts: texts(raw), sheets: sheets(raw) }
 }
 
-/// The texts that lie on the design layers themselves (not those inside symbols and other
-/// objects), on the elevation of their layer.
+/// The texts on the design layers, on the elevation of their layer.
 fn texts(raw: &Raw) -> Vec<vwx_model::Text> {
     let mut out = Vec::new();
     for (i, layer) in raw.records.iter().enumerate() {
         if layer.kind() != kind::LAYER || raw::layer_is_sheet(layer.bytes) {
             continue;
         }
-        let (name, z) = (raw::layer_name(layer.bytes).unwrap_or_default(), raw::layer_elevation(layer.bytes));
-        for &c in &raw.children[i] {
-            let Some(t) = Some(&raw.records[c]).filter(|r| r.kind() == kind::TEXT).and_then(shapes::text) else { continue };
-            out.push(vwx_model::Text {
-                id: c as u64,
-                layer: name.clone(),
-                text: t.text,
-                at: [t.at[0], t.at[1], z].map(|v| (v * SCALE) as f32),
-                width: (t.width * SCALE) as f32,
-                height: (t.height * SCALE) as f32,
-                size: t.size as f32,
-                lines: t.lines,
-            });
+        let name = raw::layer_name(layer.bytes).unwrap_or_default();
+        texts_in(raw, i, &Affine::translation([0.0, 0.0, raw::layer_elevation(layer.bytes)]), &name, 0, &mut out);
+    }
+    out
+}
+
+/// Adds the texts among what record `i` holds: its own, and those inside its groups and
+/// plug-in objects (a label, a title block), placed as their object is.
+fn texts_in(raw: &Raw, i: usize, place: &Affine, layer: &str, depth: usize, out: &mut Vec<vwx_model::Text>) {
+    if depth >= MAX_DEPTH {
+        return;
+    }
+    for &c in &raw.children[i] {
+        let r = &raw.records[c];
+        match r.kind() {
+            kind::TEXT => {
+                let Some(t) = shapes::text(r) else { continue };
+                // the top left corner of its box, where its object puts it
+                let at = place.apply([t.at[0], t.at[1], 0.0]);
+                out.push(vwx_model::Text {
+                    id: c as u64,
+                    layer: layer.to_string(),
+                    text: t.text,
+                    at: at.map(|v| (v * SCALE) as f32),
+                    width: (t.width * SCALE) as f32,
+                    height: (t.height * SCALE) as f32,
+                    size: t.size as f32,
+                    lines: t.lines,
+                });
+            }
+            kind::GROUP => texts_in(raw, c, place, layer, depth + 1, out),
+            kind::PLUG_IN_OBJECT => {
+                let place = shapes::plug_in_placement(r).map_or(*place, |p| p.then(place));
+                texts_in(raw, c, &place, layer, depth + 1, out);
+            }
+            _ => {}
         }
+    }
+}
+
+/// The sheet layers of a document: what is drawn on each (lines, arcs, outlines; texts).
+fn sheets(raw: &Raw) -> Vec<vwx_model::Sheet> {
+    let mut out = Vec::new();
+    for (i, layer) in raw.records.iter().enumerate() {
+        if layer.kind() != kind::LAYER || !raw::layer_is_sheet(layer.bytes) {
+            continue;
+        }
+        let mut names = raw::layer_texts(layer.bytes).into_iter();
+        let (number, title) = (names.next().unwrap_or_default(), names.next().unwrap_or_default());
+        // drawn as a layer is, then only its line work kept, flat
+        let mut builder = Builder { raw, batches: BTreeMap::new(), elevation: 0.0, bodies: HashMap::new() };
+        for &child in &raw.children[i] {
+            builder.walk(child, &Affine::IDENTITY, false, (i, 0), 0);
+        }
+        let mut lines = Vec::new();
+        for batch in builder.batches.values() {
+            let point = |k: u32| [batch.mesh.positions[3 * k as usize], batch.mesh.positions[3 * k as usize + 1]];
+            lines.extend(batch.mesh.lines.as_chunks::<2>().0.iter().map(|pair| [point(pair[0]), point(pair[1])]));
+        }
+        let mut texts = Vec::new();
+        texts_in(raw, i, &Affine::IDENTITY, &number, 0, &mut texts);
+        let viewports = raw.children[i].iter().filter(|&&c| raw.records[c].kind() == kind::VIEWPORT).count();
+        out.push(vwx_model::Sheet { id: i as u64, number, title, lines, texts, viewports });
     }
     out
 }
@@ -387,6 +435,9 @@ impl Builder<'_, '_> {
         let color = shapes::fill_index(r).and_then(|k| raw.palette.color(k)).unwrap_or(DEFAULT_COLOR);
         match r.kind() {
             kind::END | kind::USER_DATA => {}
+            // a viewport shows the model on a sheet: what it holds is laid out by it, which is
+            // not read yet
+            kind::VIEWPORT => {}
             // the children of a CSG solid are its operands; the result is its Parasolid body
             kind::CSG_SOLID => {
                 self.body(i, place, key, color, true);
@@ -989,6 +1040,46 @@ mod tests {
         let u = unpacked(records);
         let scene = scene(&Raw::new(&u).unwrap(), Info::default());
         assert_eq!(&scene.meshes[0].positions[..6], &[2.0, 8.05, 0.0, 3.0, 8.05, 0.0]);
+    }
+
+    #[test]
+    fn a_sheet_layer_gives_a_sheet_with_its_lines_and_texts() {
+        // sheet 001 "Plans": a line, and a title block (a plug-in object at (100, 50)) with a text
+        let mut sheet = layer("001", 0.0);
+        sheet[0x24c] = 2;
+        // its title, after its name
+        let end = sheet.len() - 8;
+        sheet.truncate(end);
+        let title: Vec<u8> = "Plans".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        sheet.extend((title.len() as u32).to_le_bytes());
+        sheet.extend(&title);
+        let n = sheet.len() as u64;
+        sheet[0..8].copy_from_slice(&n.to_le_bytes());
+        let line = record(kind::LINE, 140, &[(0x80, 420.0)]);
+        let block = record(kind::PLUG_IN_OBJECT, 433, &[(0xf0, 1.0), (0x110, 1.0), (0x130, 1.0), (0x138, 100.0), (0x140, 50.0)]);
+        let mut text = record(kind::TEXT, 0x19c, &[(0x68, 10.0), (0x70, 5.0), (0x78, 6.0), (0x80, 45.0), (0x108, 12.0)]);
+        text[0xa6] = 5;
+        text[0x100] = 1;
+        text.extend("Plans".encode_utf16().flat_map(u16::to_le_bytes));
+        let n = text.len() as u64;
+        text[0..8].copy_from_slice(&n.to_le_bytes());
+        let records = vec![
+            tagged(sheet, 1, 1, 0),
+            tagged(line, 2, 0, 0),
+            tagged(block, 2, 0, 0),
+            tagged(text, 3, 0, 0),
+            tagged(record(kind::END, 88, &[]), 3, 0, 0),
+            tagged(record(kind::VIEWPORT, 858, &[]), 2, 0, 0),
+            tagged(record(kind::END, 88, &[]), 2, 0, 0),
+        ];
+        let u = unpacked(records);
+        let scene = scene(&Raw::new(&u).unwrap(), Info::default());
+        assert!(scene.meshes.is_empty());
+        let sheet = &scene.sheets[0];
+        assert_eq!((sheet.number.as_str(), sheet.title.as_str(), sheet.viewports), ("001", "Plans", 1));
+        assert_eq!(sheet.lines, [[[0.0, 0.0], [0.42, 0.0]]]);
+        // the text of the title block, where the block is
+        assert_eq!((sheet.texts[0].text.as_str(), sheet.texts[0].at), ("Plans", [0.105, 0.06, 0.0]));
     }
 
     #[test]

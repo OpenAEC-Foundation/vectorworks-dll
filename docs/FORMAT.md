@@ -126,10 +126,10 @@ Its visibility is the byte at 0xb6: 0 visible, 0xff invisible, 2 greyed (samples
 the values the scripting interface gives). The `u16` at 0x54 is the palette index of its fill
 and bit 0x80 of the byte at 0x50 says objects take the class attributes when made (sample 132).
 
-**Layers (type 31).** Reference number at 0x1a, elevation `f64` at 0x20e (pair 90/95), the name:
-`u32le` length in bytes at 0x2a2, UTF-16LE text. After it 4 bytes and a second text the same
-way, the level the layer belongs to (`Top of Slab`, `Finish Floor` in
-`Residential New Construction.sta`; empty in a new document). The byte at 0x24c is 1 for a
+**Layers (type 31).** Reference number at 0x1a, elevation `f64` at 0x20e (pair 90/95), its texts,
+one after the other from 0x2a2, each a `u32le` length in bytes and UTF-16LE: its name, its title
+(a sheet layer of `Residential New Construction.sta`: `210`, `Plans`) and the level it belongs
+to (a design layer: `Top of Slab`, `Finish Floor`; empty in a new document). The byte at 0x24c is 1 for a
 design layer and 2 for a sheet layer (the numbers the scripting interface gives). The `i16` at
 0xd8 is the visibility of the layer: 0 visible, -1 invisible, 2 greyed (samples 150, 151, 152). The children of the
 record are the objects on the layer.

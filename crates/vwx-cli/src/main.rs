@@ -168,6 +168,10 @@ fn run(args: &[String]) -> Result<Option<Value>, String> {
                 })).collect::<Vec<_>>(),
                 "views": scene.views,
                 "texts": scene.texts,
+                "sheets": scene.sheets.iter().map(|s| json!({
+                    "number": s.number, "title": s.title, "lines": s.lines.len(), "viewports": s.viewports,
+                    "texts": s.texts.iter().map(|t| t.text.clone()).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>(),
             })))
         }
         "mesh" => {

@@ -44,6 +44,7 @@ pub mod kind {
     pub const POLY_MESH: u8 = 85;
     pub const PLUG_IN_OBJECT: u8 = 86;
     pub const CLASS: u8 = 94;
+    pub const VIEWPORT: u8 = 122;
     /// A primitive solid: sphere, hemisphere, cone.
     pub const SOLID: u8 = 95;
 }
@@ -135,11 +136,24 @@ pub fn utf16(bytes: &[u8]) -> String {
     String::from_utf16_lossy(&units)
 }
 
-/// A layer record (type 31): its name at 0x2a2, a `u32` length in bytes and UTF-16LE (other
-/// texts follow it); its elevation is an `f64` at 0x20e.
+/// The texts of a layer record (type 31), one after the other from 0x2a2, each a `u32` length
+/// in bytes and UTF-16LE: its name, its title (a sheet layer: `001`, `House plans`) and the
+/// level it belongs to (a design layer: `Top of Slab`).
+pub fn layer_texts(record: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut at = 0x2a2;
+    while out.len() < 3 {
+        let Some(len) = le::u32(record, at).map(|l| l as usize).filter(|l| l.is_multiple_of(2) && *l <= 2048) else { break };
+        let Some(text) = record.get(at + 4..at + 4 + len) else { break };
+        out.push(utf16(text));
+        at += 4 + len;
+    }
+    out
+}
+
+/// The name of a layer (see [`layer_texts`]); its elevation is an `f64` at 0x20e.
 pub fn layer_name(record: &[u8]) -> Option<String> {
-    let len = le::u32(record, 0x2a2)? as usize;
-    (len.is_multiple_of(2) && len <= 2048).then(|| record.get(0x2a6..0x2a6 + len).map(utf16))?
+    layer_texts(record).into_iter().next()
 }
 
 /// True for a class (type 94) that is set invisible: the byte at 0xb6 is 0 for a visible class,
