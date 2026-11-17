@@ -242,6 +242,11 @@ fn sheets(raw: &Raw) -> Vec<vwx_model::Sheet> {
                 origin: v.origin.map(|x| (x * SCALE) as f32),
                 forward: v.axes[2].map(|x| -x as f32),
                 up: v.axes[1].map(|x| x as f32),
+                // a section viewport keeps what it cuts in a group tagged `hcsc`
+                section: raw.children[c]
+                    .iter()
+                    .filter(|&&g| raw.records[g].kind() == kind::GROUP)
+                    .any(|&g| raw.children[g].first().is_some_and(|&t| raw.records[t].kind() == kind::USER_DATA && raw.records[t].bytes.get(0x50..0x54) == Some(b"hcsc"))),
                 // it shows the design layers it names as visible or greyed, and no others
                 hidden_layers: design_layers.iter().filter(|(number, _)| !v.layers.iter().any(|(n, visibility)| n == number && *visibility != -1)).map(|(_, name)| name.clone()).collect(),
                 hidden_classes: v.classes.iter().filter(|(_, visibility)| *visibility == -1).filter_map(|(n, _)| raw.names.get(n).cloned()).collect(),

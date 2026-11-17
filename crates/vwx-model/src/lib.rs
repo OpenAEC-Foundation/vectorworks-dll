@@ -156,6 +156,9 @@ pub struct Viewport {
     /// From the eye into the model, and up on the sheet.
     pub forward: [f32; 3],
     pub up: [f32; 3],
+    /// True for a section viewport: the sheet has the drawing of the cut it keeps (among the
+    /// lines of the sheet), which a view of the whole model would not be.
+    pub section: bool,
     /// The design layers it does not show, and the classes it does not show, by name.
     pub hidden_layers: Vec<String>,
     pub hidden_classes: Vec<String>,
