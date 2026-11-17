@@ -100,6 +100,21 @@ pub struct Document {
     pub objects: Vec<Object>,
     #[serde(default)]
     pub settings: DocumentSettings,
+    /// The line types (dash patterns) of the document.
+    #[serde(default)]
+    pub line_types: Vec<LineType>,
+    /// The hatches of the document.
+    #[serde(default)]
+    pub hatches: Vec<Hatch>,
+    /// The gradients of the document.
+    #[serde(default)]
+    pub gradients: Vec<Gradient>,
+    /// The tile fills of the document.
+    #[serde(default)]
+    pub tiles: Vec<Tile>,
+    /// The image fills of the document.
+    #[serde(default)]
+    pub image_fills: Vec<ImageFill>,
 }
 
 /// A triangle mesh for a viewer: one per layer/class/material batch.
@@ -422,4 +437,97 @@ pub struct View {
     pub forward: [f32; 3],
     /// Up on the screen.
     pub up: [f32; 3],
+}
+
+/// A line type: the dashes lines drawn with it have. Lengths in metres on paper (a line on a
+/// design layer at 1 : 50 has dashes 50 times as long in the model).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LineType {
+    /// Its reference number: objects name it by minus this number.
+    pub id: u64,
+    pub name: String,
+    /// Dash, gap, dash, gap, ...; empty for a line type of geometry.
+    pub dashes: Vec<f64>,
+    /// The dashes grow with the weight of the line.
+    pub scale_with_thickness: bool,
+    /// Drawn with geometry repeated along the line (not decoded: such lines are drawn solid).
+    pub complex: bool,
+}
+
+/// A hatch: families of parallel dashed lines filling a shape.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Hatch {
+    /// Its reference number: objects name it by minus this number.
+    pub id: u64,
+    pub name: String,
+    /// Its lengths are on paper (they scale with the layer) rather than in the model.
+    pub page: bool,
+    pub rotate_in_wall: bool,
+    pub rotate_in_symbol: bool,
+    /// Its background is not drawn.
+    pub transparent: bool,
+    /// The colour of its background (sRGB).
+    pub background: [u8; 3],
+    pub levels: Vec<HatchLevel>,
+}
+
+/// One family of parallel lines of a hatch, in metres (on paper for a page-based hatch), x
+/// right and y up in the frame of the filled object's fill.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct HatchLevel {
+    /// A point a dash starts at.
+    pub start: [f64; 2],
+    /// The direction of the lines, as long as a dash and its gap.
+    pub repeat: [f64; 2],
+    /// From one line to the next.
+    pub offset: [f64; 2],
+    /// The part of `repeat` drawn (1: solid lines).
+    pub dash: f64,
+    pub color: [u8; 3],
+    /// Line weight in thousandths of an inch.
+    pub weight: u16,
+}
+
+/// A gradient fill: colours at places from 0 to 1.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Gradient {
+    pub id: u64,
+    pub name: String,
+    pub stops: Vec<GradientStop>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct GradientStop {
+    pub position: f64,
+    /// Where between this stop and the next their colours mix half and half (0 to 1).
+    pub midpoint: f64,
+    pub color: [u8; 3],
+    /// Opacity in percent.
+    pub opacity: u16,
+}
+
+/// A tile fill: geometry repeated on a grid (metres).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Tile {
+    pub id: u64,
+    pub name: String,
+    /// The two steps from one tile to its neighbours.
+    pub repeat: [f64; 2],
+    pub offset: [f64; 2],
+    pub background: [u8; 3],
+    /// The line segments of one tile.
+    pub lines: Vec<[[f64; 2]; 2]>,
+}
+
+/// An image fill: the image file as stored (a PNG or JPEG file).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ImageFill {
+    pub id: u64,
+    pub name: String,
+    /// `png`, `jpeg`, ...
+    pub format: String,
+    pub width: u32,
+    pub height: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub data: Vec<u8>,
 }

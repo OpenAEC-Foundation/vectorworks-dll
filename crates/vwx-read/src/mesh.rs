@@ -26,7 +26,9 @@ use vwx_model::{Info, Mesh, Scene, View};
 
 use crate::raw::{self, kind, Raw};
 use crate::shapes::{self, Affine, P2, P3};
+use crate::styles;
 use crate::tri;
+use vwx_core::container::Record;
 
 /// Millimetres to metres.
 const SCALE: f64 = 0.001;
@@ -74,7 +76,7 @@ pub fn scene(raw: &Raw, info: Info) -> Scene {
 /// The meshes of a document, and for each record whether drawing it gave triangles or line
 /// segments (what it holds included): the measure of `crate::coverage`.
 pub fn scene_and_drawn(raw: &Raw, info: Info) -> (Scene, Vec<bool>) {
-    let mut builder = Builder { raw, batches: BTreeMap::new(), elevation: 0.0, bodies: HashMap::new(), drawn: vec![false; raw.records.len()], redraw: false };
+    let mut builder = Builder { raw, batches: BTreeMap::new(), elevation: 0.0, bodies: HashMap::new(), drawn: vec![false; raw.records.len()], redraw: false, paper: 1.0 };
     for (i, r) in raw.records.iter().enumerate() {
         // a sheet layer is paper, not part of the model
         if r.kind() != kind::LAYER || raw::layer_is_sheet(r.bytes) {
@@ -82,6 +84,8 @@ pub fn scene_and_drawn(raw: &Raw, info: Info) -> (Scene, Vec<bool>) {
         }
         // 3D objects hold their height in the document; 2D shapes lie on their layer
         builder.elevation = raw::layer_elevation(r.bytes);
+        // dashes and page-based hatches are lengths on paper
+        builder.paper = styles::layer_scale(r.bytes);
         for &child in &raw.children[i] {
             // what is set into a wall (a door, a window, a symbol) is an object of its own, in
             // its own class; the rest of what the wall holds is the wall
@@ -113,6 +117,7 @@ pub fn scene_and_drawn(raw: &Raw, info: Info) -> (Scene, Vec<bool>) {
     }
     // a library file places nothing on its layers: its symbols are what there is to see
     if builder.batches.values().all(|b| b.mesh.indices.is_empty() && b.mesh.lines.len() == b.markers as usize) {
+        builder.paper = 1.0;
         builder.library();
     }
     let mut meshes: Vec<Mesh> = builder.batches.into_values().map(|b| b.mesh).filter(|m| !m.indices.is_empty() || !m.lines.is_empty()).collect();
@@ -226,17 +231,36 @@ fn kept_drawing(raw: &Raw, viewport: usize, v: &shapes::Viewport) -> (Vec<[[f32;
             }
             let class = raw.by_ref.get(&r.class_id()).map(|&k| &raw.records[k]).filter(|k| k.kind() == kind::CLASS);
             let outline = shapes::outline(r).filter(|o| o.iter().flatten().all(|x| x.is_finite()));
-            // what is cut is filled in the colour of its fill
+            // what is cut is filled in the colour of its fill, or hatched
             if let Some(outline) = outline.as_ref().filter(|_| r.kind() != kind::LINE && shapes::closed(r) && shapes::filled(r, class)) {
                 let color = shapes::fill_index(r, class).and_then(|k| raw.palette.color(k)).unwrap_or(DEFAULT_COLOR);
-                fills.push(vwx_model::Fill { id: c as u64, outline: outline.iter().map(|p| on_sheet(*p)).collect(), color });
+                let pen = shapes::pen_index(r, class).and_then(|k| raw.palette.color(k)).unwrap_or(PEN_COLOR);
+                let filling = styles::filling(raw, c, class, outline, v.scale, color, pen);
+                if let Some(color) = filling.color {
+                    fills.push(vwx_model::Fill { id: c as u64, outline: outline.iter().map(|p| on_sheet(*p)).collect(), color });
+                }
+                lines.extend(filling.lines.iter().map(|([a, b], _)| [on_sheet(*a), on_sheet(*b)]));
             }
             if !shapes::stroked(r, class) {
                 continue;
             }
+            // its lines, in dashes when its pen is a line type of dashes
+            let pattern = styles::dashes(raw, r, class, v.scale);
+            let mut draw = |points: &[P2], closed: bool| match pattern.as_ref().and_then(|p| styles::dash(points, closed, p)) {
+                Some(dashes) => lines.extend(dashes.iter().map(|[a, b]| [on_sheet(*a), on_sheet(*b)])),
+                None => {
+                    lines.extend(points.windows(2).map(|w| [on_sheet(w[0]), on_sheet(w[1])]));
+                    if closed {
+                        lines.push([on_sheet(points[points.len() - 1]), on_sheet(points[0])]);
+                    }
+                }
+            };
             if let Some(vertices) = (r.kind() == kind::POLYLINE).then(|| shapes::polyline(r)).flatten() {
                 // a polyline: its sides that are drawn (those to its holes are not)
-                lines.extend(shapes::polyline_segments(&vertices, shapes::closed(r)).into_iter().filter(|s| s.iter().flatten().all(|c| c.is_finite())).map(|[a, b]| [on_sheet(a), on_sheet(b)]));
+                let sides: Vec<[P2; 2]> = shapes::polyline_segments(&vertices, shapes::closed(r)).into_iter().filter(|s| s.iter().flatten().all(|c| c.is_finite())).collect();
+                for line in styles::chains(&sides) {
+                    draw(&line, false);
+                }
                 continue;
             }
             let points: Vec<P2> = match r.kind() {
@@ -246,10 +270,7 @@ fn kept_drawing(raw: &Raw, viewport: usize, v: &shapes::Viewport) -> (Vec<[[f32;
             if points.len() < 2 || points.iter().flatten().any(|c| !c.is_finite()) {
                 continue;
             }
-            lines.extend(points.windows(2).map(|w| [on_sheet(w[0]), on_sheet(w[1])]));
-            if r.kind() != kind::LINE && shapes::closed(r) && outline.is_some() && points.len() > 2 {
-                lines.push([on_sheet(points[points.len() - 1]), on_sheet(points[0])]);
-            }
+            draw(&points, r.kind() != kind::LINE && shapes::closed(r) && outline.is_some() && points.len() > 2);
         }
     }
     (lines, fills)
@@ -268,7 +289,7 @@ fn sheets(raw: &Raw) -> Vec<vwx_model::Sheet> {
         let mut names = raw::layer_texts(layer.bytes).into_iter();
         let (number, title) = (names.next().unwrap_or_default(), names.next().unwrap_or_default());
         // drawn as a layer is, then only its line work kept, flat
-        let mut builder = Builder { raw, batches: BTreeMap::new(), elevation: 0.0, bodies: HashMap::new(), drawn: Vec::new(), redraw: false };
+        let mut builder = Builder { raw, batches: BTreeMap::new(), elevation: 0.0, bodies: HashMap::new(), drawn: Vec::new(), redraw: false, paper: 1.0 };
         for &child in &raw.children[i] {
             builder.walk(child, &Affine::IDENTITY, false, (i, 0), 0);
         }
@@ -280,10 +301,12 @@ fn sheets(raw: &Raw) -> Vec<vwx_model::Sheet> {
             let Some(v) = shapes::viewport(&raw.records[c]) else { continue };
             let k = 1.0 / v.scale;
             let on_sheet = Affine { rows: [[k, 0.0, 0.0], [0.0, k, 0.0], [0.0, 0.0, k]], offset: [0.0; 3] };
+            builder.paper = v.scale;
             for &group in raw.children[c].iter().filter(|&&g| raw.records[g].kind() == kind::GROUP && !keeps_drawing(&raw.records[g]) && !is_crop(raw, g)) {
                 builder.walk(group, &on_sheet, false, (i, 0), 0);
                 texts_in(raw, group, &on_sheet, &number, 0, &mut texts);
             }
+            builder.paper = 1.0;
         }
         let mut lines = Vec::new();
         for batch in builder.batches.values() {
@@ -365,6 +388,9 @@ struct Builder<'a, 'b> {
     /// True while the 2D shapes of an object without a 3D form are drawn: its markers were
     /// drawn already with its 3D form.
     redraw: bool,
+    /// Millimetres of the drawing per millimetre of paper (the scale of the layer or viewport
+    /// drawn): dashes and page-based hatches are lengths on paper.
+    paper: f64,
 }
 
 impl Builder<'_, '_> {
@@ -528,6 +554,35 @@ impl Builder<'_, '_> {
         mesh.lines.extend((0..n - 1).flat_map(|k| [base + k, base + k + 1]));
         if closed && n > 2 {
             mesh.lines.extend([base + n - 1, base]);
+        }
+    }
+
+    /// Draws the line through `points` (in the coordinates of object `r`, at height `z`, placed
+    /// by `place`) with the pen of `r`: in dashes when it has a line type of dashes.
+    #[allow(clippy::too_many_arguments)]
+    fn pen_line(&mut self, r: &Record, class: Option<&Record>, key: (usize, u32), points: &[P2], closed: bool, place: &Affine, z: f64, color: [u8; 3]) {
+        let at = |p: &P2| place.apply([p[0], p[1], z]);
+        match styles::dashes(self.raw, r, class, self.paper).and_then(|pattern| styles::dash(points, closed, &pattern)) {
+            Some(dashes) => {
+                for [a, b] in dashes {
+                    self.stroke(key, &[at(&a), at(&b)], color, false);
+                }
+            }
+            None => self.stroke(key, &points.iter().map(at).collect::<Vec<P3>>(), color, closed),
+        }
+    }
+
+    /// Draws the fill of 2D object `i` inside `outline` (its own coordinates, at height `z`,
+    /// placed by `place`): a face in its colour, and the lines of its hatch or tiles.
+    #[allow(clippy::too_many_arguments)]
+    fn fill(&mut self, i: usize, class: Option<&Record>, key: (usize, u32), outline: &[P2], place: &Affine, z: f64, color: [u8; 3], pen: [u8; 3]) {
+        let filling = styles::filling(self.raw, i, class, outline, self.paper, color, pen);
+        let at = |p: &P2| place.apply([p[0], p[1], z]);
+        if let Some(color) = filling.color {
+            self.face(key, &outline.iter().map(at).collect::<Vec<P3>>(), color, place.mirrors());
+        }
+        for ([a, b], color) in filling.lines {
+            self.stroke(key, &[at(&a), at(&b)], color, false);
         }
     }
 
@@ -738,24 +793,23 @@ impl Builder<'_, '_> {
                 let pen = shapes::pen_index(r, class).and_then(|k| raw.palette.color(k)).unwrap_or(PEN_COLOR);
                 if let Some(outline) = shapes::outline(r) {
                     let outline = counter_clockwise(outline);
-                    let world: Vec<P3> = outline.iter().map(|p| place.apply([p[0], p[1], z])).collect();
-                    // a shape with a fill is a face, one without is its outline
+                    // a shape with a fill is a face (with the lines of its hatch), one without
+                    // is its outline
                     if shapes::filled(r, class) {
-                        self.face(key, &world, color, place.mirrors());
+                        self.fill(i, class, key, &outline, place, z, color, pen);
                     } else if shapes::stroked(r, class) {
                         match (r.kind() == kind::POLYLINE).then(|| shapes::polyline(r)).flatten() {
                             // a polyline: its sides that are drawn
                             Some(vertices) => {
-                                for [a, b] in shapes::polyline_segments(&vertices, shapes::closed(r)) {
-                                    self.stroke(key, &[place.apply([a[0], a[1], z]), place.apply([b[0], b[1], z])], pen, false);
+                                for line in styles::chains(&shapes::polyline_segments(&vertices, shapes::closed(r))) {
+                                    self.pen_line(r, class, key, &line, false, place, z, pen);
                                 }
                             }
-                            None => self.stroke(key, &world, pen, shapes::closed(r)),
+                            None => self.pen_line(r, class, key, &outline, shapes::closed(r), place, z, pen),
                         }
                     }
                 } else if let Some(points) = (r.kind() == kind::ARC && shapes::stroked(r, class)).then(|| shapes::arc(r)).flatten() {
-                    let world: Vec<P3> = points.iter().map(|p| place.apply([p[0], p[1], z])).collect();
-                    self.stroke(key, &world, pen, false);
+                    self.pen_line(r, class, key, &points, false, place, z, pen);
                 }
             }
             kind::LINE => {
@@ -765,7 +819,7 @@ impl Builder<'_, '_> {
                 if let Some([a, b]) = shapes::line(r) {
                     let z = self.elevation;
                     let pen = shapes::pen_index(r, class).and_then(|k| raw.palette.color(k)).unwrap_or(PEN_COLOR);
-                    self.stroke(key, &[place.apply([a[0], a[1], z]), place.apply([b[0], b[1], z])], pen, false);
+                    self.pen_line(r, class, key, &[a, b], false, place, z, pen);
                 }
             }
             kind::SYMBOL => {
