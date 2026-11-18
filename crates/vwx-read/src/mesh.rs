@@ -76,7 +76,16 @@ pub fn scene(raw: &Raw, info: Info) -> Scene {
 /// The meshes of a document, and for each record whether drawing it gave triangles or line
 /// segments (what it holds included): the measure of `crate::coverage`.
 pub fn scene_and_drawn(raw: &Raw, info: Info) -> (Scene, Vec<bool>) {
-    let mut builder = Builder { raw, batches: BTreeMap::new(), elevation: 0.0, bodies: HashMap::new(), drawn: vec![false; raw.records.len()], redraw: false, paper: 1.0 };
+    let mut builder = Builder {
+        raw,
+        batches: BTreeMap::new(),
+        elevation: 0.0,
+        bodies: HashMap::new(),
+        drawn: vec![false; raw.records.len()],
+        redraw: false,
+        paper: 1.0,
+        textures: crate::textures::Colours::default(),
+    };
     for (i, r) in raw.records.iter().enumerate() {
         // a sheet layer is paper, not part of the model; a private layer is Vectorworks' own
         if !raw::is_design_layer(r) {
@@ -289,7 +298,8 @@ fn sheets(raw: &Raw) -> Vec<vwx_model::Sheet> {
         let mut names = raw::layer_texts(layer.bytes).into_iter();
         let (number, title) = (names.next().unwrap_or_default(), names.next().unwrap_or_default());
         // drawn as a layer is, then only its line work kept, flat
-        let mut builder = Builder { raw, batches: BTreeMap::new(), elevation: 0.0, bodies: HashMap::new(), drawn: Vec::new(), redraw: false, paper: 1.0 };
+        let mut builder =
+            Builder { raw, batches: BTreeMap::new(), elevation: 0.0, bodies: HashMap::new(), drawn: Vec::new(), redraw: false, paper: 1.0, textures: crate::textures::Colours::default() };
         for &child in &raw.children[i] {
             builder.walk(child, &Affine::IDENTITY, false, (i, 0), 0);
         }
@@ -391,6 +401,8 @@ struct Builder<'a, 'b> {
     /// Millimetres of the drawing per millimetre of paper (the scale of the layer or viewport
     /// drawn): dashes and page-based hatches are lengths on paper.
     paper: f64,
+    /// The colours of the textures, as objects need them.
+    textures: crate::textures::Colours,
 }
 
 impl Builder<'_, '_> {
@@ -652,7 +664,9 @@ impl Builder<'_, '_> {
         let r = &raw.records[i];
         // its class, for what it takes from there
         let class = raw.by_ref.get(&r.class_id()).map(|&c| &raw.records[c]).filter(|c| c.kind() == kind::CLASS);
-        let color = shapes::fill_index(r, class).and_then(|k| raw.palette.color(k)).unwrap_or(DEFAULT_COLOR);
+        // the colour of its texture (or its class's), as a rendered view shows it, else that of
+        // its fill
+        let color = self.textures.of_object(raw, r, class).or_else(|| shapes::fill_index(r, class).and_then(|k| raw.palette.color(k))).unwrap_or(DEFAULT_COLOR);
         match r.kind() {
             kind::END | kind::USER_DATA => {}
             // a viewport shows the model on a sheet: what it holds is laid out by it, which is

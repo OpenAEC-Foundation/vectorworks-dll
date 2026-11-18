@@ -30,6 +30,7 @@ pub mod records;
 pub mod resources;
 pub mod shapes;
 pub mod styles;
+pub mod textures;
 pub mod tri;
 pub mod worksheet;
 

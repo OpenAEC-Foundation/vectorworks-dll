@@ -209,6 +209,12 @@ fn run(args: &[String]) -> Result<Option<Value>, String> {
                 "info": scene.info,
                 "meshes": scene.meshes.iter().map(|m| json!({
                     "name": m.name, "triangles": m.indices.len() / 3, "lines": m.lines.len() / 2, "objects": m.props.len(), "hidden": m.hidden,
+                    // the colour most of its vertices have
+                    "color": m.colors.as_ref().and_then(|c| {
+                        let mut counts = std::collections::HashMap::new();
+                        c.iter().for_each(|v| *counts.entry([v[0], v[1], v[2]]).or_insert(0usize) += 1);
+                        counts.into_iter().max_by_key(|e| e.1).map(|e| e.0)
+                    }),
                 })).collect::<Vec<_>>(),
                 "views": scene.views,
                 "plans": scene.plans.iter().map(|p| json!({"layer": p.layer, "lines": p.lines.len(), "objects": p.elements.len()})).collect::<Vec<_>>(),
@@ -413,6 +419,35 @@ fn run(args: &[String]) -> Result<Option<Value>, String> {
             })))
         }
         "coverage" => coverage::run(file()?, |name| opt(args, name).map(str::to_string)).map(|_| None),
+        "textures" => {
+            // the textures of a document (analysis): each with the values of the records it
+            // and its bitmap hold, and the classes that point to it
+            let path = file()?;
+            let u = vwx_core::container::unpack(&read(path)?).map_err(|e| format!("{path}: {e}"))?;
+            let raw = vwx_read::raw::Raw::new(&u).map_err(|e| format!("{path}: {e}"))?;
+            let mut names = std::collections::HashMap::new();
+            for (i, r) in raw.records.iter().enumerate().filter(|(_, r)| r.kind() == 97) {
+                let name = raw.name(i).unwrap_or("").to_string();
+                println!("TEXTURE {} {name:?} at 0x{:x}", r.ref_id(), r.offset);
+                names.insert(r.ref_id(), name);
+                for &c in std::iter::once(&i).chain(raw.children[i].iter().filter(|&&c| raw.records[c].kind() == 93)) {
+                    for (record, values) in vwx_read::records::of_object(&raw, c) {
+                        println!("  {}{record}: {values:?}", if c == i { "" } else { "bitmap " });
+                    }
+                }
+                for &c in &raw.children[i] {
+                    let k = &raw.records[c];
+                    if k.kind() == 119 {
+                        println!("  image {} bytes, head {}", k.bytes.len(), hex::dump(&k.bytes[0x50..k.bytes.len().min(0x90)], 0).lines().next().unwrap_or(""));
+                    }
+                }
+            }
+            for (i, r) in raw.records.iter().enumerate().filter(|(_, r)| r.kind() == vwx_read::raw::kind::CLASS) {
+                let refs: Vec<String> = (0..6).filter_map(|k| vwx_core::le::u32(r.bytes, 0x9e + 4 * k)).map(|v| names.get(&v).map_or(v.to_string(), |n| format!("{v} {n:?}"))).collect();
+                println!("CLASS {:?}: {}", raw.name(i).unwrap_or(""), refs.join(" | "));
+            }
+            Ok(None)
+        }
         "probe" => to(serde_json::to_value(Probe::of(&read(file()?)?))),
         "survey" => survey(Path::new(file()?)).map(|_| None),
         "hex" => {

@@ -444,3 +444,28 @@ surfaces; unsuccessful refinement retains the original chart polyline. Terminato
 extend chart endpoints. For periodic curved faces, the parameter seam is moved into a gap
 between holes before triangulation. These changes live in `vwx-xt`; they do not change the
 container or the unit conversion.
+
+### Textures: type 97
+
+A texture keeps its shaders as records (type 48) attached to it, one per shader, whose record
+formats are named after the shader: `NNAMaxon Plain Color` (fields `Color`, `Color G`,
+`Color B`: red, green, blue 0..255), `NNAMaxon Image Color` (`Filter_Color`, `Filter_Color G`,
+`Filter_Color B`), `NNAMaxon Image Bump`, `NNAMaxon Image Mask Transparency`, reflectivity,
+noise and others, plus `NNAPreview Object Options` and `NNAShadow Options`. A shader that uses an
+image has a bitmap (type 93) under its record, with the image in a record of type 119: a header
+with the width (`u32` at 0x7c of the record), height (0x80) and bits per pixel (0x84), the tag
+`png ` or `jpeg` (stored reversed at 0xa4), and from byte 234 the PNG or JPEG file itself. The
+texture's own records of type 119 are its preview images. A lawn of 2027 (`Grass Lawn 02
+<Displace Map>`) has a displacement map of 3800 x 2600 under one shader and its colour image
+(JPEG, 2000 x 2000) under `Image Color`: the colour is the bitmap under that record.
+
+Objects point to their texture by its reference number: a mesh (40) and a 3D polygon (25) at
+0xcc, a plug-in object (86) at 0xec, a CSG solid (84) at 0x17e (the reference number of one of
+the 67 textures of a garden design, at that offset in 206 meshes, 44 3D polygons, 46 plug-in
+objects, 22 CSG solids). A class has its texture at 0x9e and five more after it, every 4 bytes
+(a roof class: `Roofing Asphalt Gray` at 0x9e and 0xae, a gloss white at 0xb2; parts of an
+object such as its top and its edges). The reader colours what an object draws with the
+average colour of its texture's image (times the filter colour) or its plain colour, else that
+of its class's texture, else its fill colour: the site model of the garden design is the green
+of its lawn, its roads the grey of their asphalt. Which part of an object takes which of the
+six textures of its class, and texture mapping (the image itself on the faces), are not read.
