@@ -38,12 +38,12 @@ function Main-Window {
     Get-Process | Where-Object { $_.ProcessName -like 'Vectorworks20*' -and $_.MainWindowHandle -ne 0 } | Select-Object -First 1
 }
 
-# The documents open in Vectorworks: the frames of its views titled by a file (a document is
-# not always titled by the name of the file it was opened from).
+# The documents open in Vectorworks: the frames of its views (a document is not always titled
+# by the name of the file it was opened from, and a template opens as a new untitled one).
 function Documents {
     $w = Main-Window
     if (-not $w) { return @() }
-    @([Msaa]::ChildWindows([long]$w.MainWindowHandle) | Where-Object { $_ -match 'AfxFrameOrView.*\.(vwx|sta)' })
+    @([Msaa]::ChildWindows([long]$w.MainWindowHandle) | Where-Object { $_ -match 'AfxFrameOrView[^|]*\|\S' })
 }
 
 # Presses OK on the message boxes Vectorworks shows (that it is a student version, that a file
