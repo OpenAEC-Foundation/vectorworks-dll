@@ -469,3 +469,15 @@ average colour of its texture's image (times the filter colour) or its plain col
 of its class's texture, else its fill colour: the site model of the garden design is the green
 of its lawn, its roads the grey of their asphalt. Which part of an object takes which of the
 six textures of its class, and texture mapping (the image itself on the faces), are not read.
+
+### Site models: plug-in object `DTM6`
+
+A site model holds its surfaces as meshes (type 40) among its children: the proposed surface
+first, the existing one second when it keeps both (the garden design of `Site Plan.sta`:
+33 164 points in a class with the texture of a lawn, then 2 462 points in class None, above the
+proposed surface where the ground is cut; `Planting Plan.sta` keeps one). The value `3D Display`
+of its record says which shows in 3D (`kTINDisplayProposedOnly` in both). Its other children
+are helpers that Vectorworks does not draw in 3D: 3D polygons of its contours, loci of its
+points, and a group with its boundary as a polygon and as an extrude from 0 to the highest point
+of the site, whose flat top would cover the whole site. The faces of the surface run clockwise
+seen from above (Vectorworks draws meshes from both sides).

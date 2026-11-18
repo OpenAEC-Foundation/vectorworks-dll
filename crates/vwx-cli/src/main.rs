@@ -193,6 +193,20 @@ fn run(args: &[String]) -> Result<Option<Value>, String> {
                             }
                         }
                         let props = m.props.iter().find(|p| p.0 == id).map(|p| p.1.as_str()).unwrap_or("");
+                        // --colours: per colour of its triangles their number and the heights they span
+                        if args.iter().any(|a| a == "--colours") {
+                            let mut by: std::collections::BTreeMap<[u8; 3], (usize, f32, f32)> = std::collections::BTreeMap::new();
+                            for t in m.indices[first as usize..(first + count) as usize].chunks(3) {
+                                let c = m.colors.as_ref().and_then(|c| c.get(t[0] as usize)).map_or([0; 3], |c| [c[0], c[1], c[2]]);
+                                let e = by.entry(c).or_insert((0, f32::MAX, f32::MIN));
+                                e.0 += 1;
+                                for &v in t {
+                                    e.1 = e.1.min(m.positions[v as usize * 3 + 2]);
+                                    e.2 = e.2.max(m.positions[v as usize * 3 + 2]);
+                                }
+                            }
+                            eprintln!("{id} colours {by:?}");
+                        }
                         // (the colour of its first vertex)
                         let color = m.colors.as_ref().and_then(|c| m.indices.get(first as usize).and_then(|&v| c.get(v as usize))).map(|c| format!("{},{},{}", c[0], c[1], c[2])).unwrap_or_default();
                         println!("{id}	{:.3} {:.3} {:.3}	{:.3} {:.3} {:.3}	{}	{}	{color}	{props}", lo[0], lo[1], lo[2], hi[0], hi[1], hi[2], count / 3, m.name);

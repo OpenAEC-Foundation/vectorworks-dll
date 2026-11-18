@@ -899,7 +899,8 @@ impl Builder<'_, '_> {
                     self.inherited = self.textures.of_object(raw, r, None).or(outer);
                 }
                 let before = self.form(key);
-                for &c in &raw.children[i] {
+                let shown = site_surfaces(raw, i);
+                for &c in raw.children[i].iter().filter(|c| shown.as_ref().is_none_or(|s| s.contains(c))) {
                     self.walk(c, place, true, key, depth);
                 }
                 if !nested && self.form(key) == before {
@@ -1062,6 +1063,33 @@ impl Builder<'_, '_> {
 }
 
 /// True when two rings are the same points, to a thousandth of their size.
+/// What a site model (plug-in object `DTM6`) shows in 3D: its surfaces only. It keeps its
+/// proposed surface as its first mesh and its existing one as its second (the garden design of
+/// `Site Plan.sta`: 33 164 points with the texture of its lawn, then 2 462 without one, above
+/// the proposed one where the ground is cut), and its setting `3D Display` says which it shows
+/// (`kTINDisplayProposedOnly` there, as in `Planting Plan.sta`, which keeps one mesh only).
+/// Its other parts are helpers Vectorworks does not draw in 3D: its contours, its points, and
+/// its boundary extruded from 0 to the highest point, whose flat top covered the whole site.
+/// `None` for any other object: all of it shows.
+fn site_surfaces(raw: &Raw, i: usize) -> Option<Vec<usize>> {
+    if raw.records[i].kind() != kind::PLUG_IN_OBJECT || crate::records::plug_in(raw, i).map(String::as_str) != Some("DTM6") {
+        return None;
+    }
+    let meshes: Vec<usize> = raw.children[i].iter().copied().filter(|&c| raw.records[c].kind() == kind::MESH).collect();
+    if meshes.is_empty() {
+        return None;
+    }
+    let display = crate::records::of_object(raw, i).into_iter().flat_map(|(_, values)| values).find_map(|(name, value)| match (name.as_str(), value) {
+        ("3D Display", crate::records::Value::Text(v)) => Some(v),
+        _ => None,
+    });
+    Some(match (display.as_deref(), meshes.len()) {
+        (Some("kTINDisplayProposedOnly"), 2) => vec![meshes[0]],
+        (Some("kTINDisplayExistingOnly"), 2) => vec![meshes[1]],
+        _ => meshes,
+    })
+}
+
 /// True when the faces of a mesh face inward: a closed mesh (every edge shared by two faces)
 /// whose volume comes out negative, or an open one whose faces point down more than up
 /// (weighted by their area).
