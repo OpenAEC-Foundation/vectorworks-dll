@@ -777,6 +777,17 @@ impl Builder<'_, '_> {
                     self.stroke(key, &world, pen, crate::objects::polygon_3d_closed(r));
                 }
             }
+            // a NURBS curve on its own is a line in space (one inside a NURBS surface bounds it,
+            // and is read with it)
+            kind::NURBS_CURVE => {
+                if self.redraw || !shapes::stroked(r, class) {
+                    return;
+                }
+                let Some(points) = shapes::nurbs_curve(r) else { return };
+                let world: Vec<P3> = points.iter().map(|&p| place.apply(p)).collect();
+                let pen = shapes::pen_index(r, class).and_then(|k| raw.palette.color(k)).unwrap_or(PEN_COLOR);
+                self.stroke(key, &world, pen, false);
+            }
             // a locus is drawn as a small cross: a 3D locus wherever it is, a 2D locus where
             // the other 2D shapes are drawn
             kind::LOCUS_3D => {

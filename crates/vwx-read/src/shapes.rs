@@ -472,38 +472,47 @@ pub fn nurbs_surface(r: &Record) -> Option<vwx_xt::nurbs::NurbsSurface> {
     vwx_xt::nurbs::NurbsSurface::new([du, dv], [nu, nv], 4, reals(0xb0, points * 4)?, [reals(knots_at, ku)?, reals(knots_at + 8 * ku, kv)?], [false, false], false)
 }
 
-/// A boundary of a NURBS surface (type 111 as a child of the surface), in the parameters
-/// (u, v) of the surface: a `u32` count of pieces at 0x8c, then from 0x90 piece after piece
-/// around the boundary. A piece: `u32` counts of control points and of knots, `u32` degree and
-/// a `u32`; its control points, four `f64` each (u·w, v·w, 0, w); its knots. Returned: the
-/// ring of (u, v) the boundary is drawn with.
-pub fn trim_loop(r: &Record) -> Option<Vec<P2>> {
+/// A NURBS curve (type 111): a `u32` count of pieces at 0x8c, then from 0x90 piece after
+/// piece. A piece: `u32` counts of control points and of knots, `u32` degree and a `u32`; its
+/// control points, four `f64` each (x·w, y·w, z·w, w); its knots. Returned: the points the curve
+/// is drawn with, piece after piece. On its own the curve is in millimetres in the coordinates
+/// it is placed in; as a boundary of a NURBS surface (a child of it) its x and y are the
+/// parameters (u, v) of the surface and z is 0.
+pub fn nurbs_curve(r: &Record) -> Option<Vec<P3>> {
     let pieces = le::u32(r.bytes, 0x8c)? as usize;
     let mut at = 0x90usize;
-    let mut ring: Vec<P2> = Vec::new();
+    let mut points: Vec<P3> = Vec::new();
     for _ in 0..pieces.min(MAX_PIECES) {
         let count = |k: usize| le::u32(r.bytes, at + 4 * k).map(|v| v as usize);
-        let (points, knots, degree) = (count(0)?, count(1)?, count(2)?);
-        let knots_at = points.checked_mul(32)?.checked_add(at + 16)?;
+        let (vertices, knots, degree) = (count(0)?, count(1)?, count(2)?);
+        let knots_at = vertices.checked_mul(32)?.checked_add(at + 16)?;
         let end = knots.checked_mul(8)?.checked_add(knots_at)?;
         if end > r.bytes.len() {
             return None;
         }
         let reals = |at: usize, count: usize| -> Option<Vec<f64>> { (0..count).map(|k| le::f64(r.bytes, at + 8 * k)).collect() };
-        let curve = vwx_xt::curve::Nurbs { degree, dim: 4, vertices: reals(at + 16, points * 4)?, knots: reals(knots_at, knots)?, rational: true };
+        let curve = vwx_xt::curve::Nurbs { degree, dim: 4, vertices: reals(at + 16, vertices * 4)?, knots: reals(knots_at, knots)?, rational: true };
         curve.range()?;
         for t in curve.parameters() {
             let p = curve.eval(t);
-            let uv = [p[0], p[1]];
-            if !(uv[0].is_finite() && uv[1].is_finite()) {
+            let p = [p[0], p[1], p[2]];
+            if !p.iter().all(|c| c.is_finite()) {
                 return None;
             }
-            if ring.last() != Some(&uv) {
-                ring.push(uv);
+            if points.last() != Some(&p) {
+                points.push(p);
             }
         }
         at = end;
     }
+    (points.len() >= 2).then_some(points)
+}
+
+/// A boundary of a NURBS surface (type 111 as a child of the surface), in the parameters
+/// (u, v) of the surface: the ring of (u, v) the boundary is drawn with (see `nurbs_curve`).
+pub fn trim_loop(r: &Record) -> Option<Vec<P2>> {
+    let mut ring: Vec<P2> = nurbs_curve(r)?.iter().map(|p| [p[0], p[1]]).collect();
+    ring.dedup();
     if ring.len() > 1 && ring.first() == ring.last() {
         ring.pop();
     }
@@ -947,5 +956,31 @@ pub(crate) mod tests {
         let turn = Affine { rows: [[0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]], offset: [0.0; 3] };
         let both = turn.then(&Affine::translation([10.0, 0.0, 5.0]));
         assert_eq!(both.apply([1.0, 0.0, 0.0]), [10.0, 1.0, 5.0]);
+    }
+
+    /// The curve the oracle drew (`CreateNurbsCurve` from (0, 0, 0) through (1000, 1000, 500)
+    /// to (2000, 0, 1000), degree 2) as the file keeps it: one piece of three points.
+    #[test]
+    fn a_nurbs_curve_on_its_own_is_read_in_space() {
+        let points = [[0.0, 0.0, 0.0], [1000.0, 1000.0, 500.0], [2000.0, 0.0, 1000.0]];
+        let mut reals = Vec::new();
+        for (k, p) in points.iter().enumerate() {
+            for (c, v) in p.iter().chain([1.0].iter()).enumerate() {
+                reals.push((0xa0 + 32 * k + 8 * c, *v));
+            }
+        }
+        for (k, v) in [0.0, 0.0, 0.0, 1.0, 1.0, 1.0].iter().enumerate() {
+            reals.push((0x100 + 8 * k, *v));
+        }
+        let mut bytes = record(111, 304, &reals);
+        for (k, v) in [1u32, 3, 6, 2, 0].iter().enumerate() {
+            bytes[0x8c + 4 * k..0x90 + 4 * k].copy_from_slice(&v.to_le_bytes());
+        }
+        let curve = nurbs_curve(&rec(&bytes)).unwrap();
+        assert_eq!(curve.first(), Some(&[0.0, 0.0, 0.0]));
+        assert_eq!(curve.last(), Some(&[2000.0, 0.0, 1000.0]));
+        // halfway along a quadratic Bezier: a quarter of each end and half of the middle
+        let middle = curve.iter().min_by(|a, b| (a[0] - 1000.0).abs().total_cmp(&(b[0] - 1000.0).abs())).unwrap();
+        assert!((middle[1] - 500.0).abs() < 1e-6 && (middle[2] - 500.0).abs() < 1e-6, "{middle:?}");
     }
 }
