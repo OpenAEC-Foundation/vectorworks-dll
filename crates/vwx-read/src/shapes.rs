@@ -176,7 +176,9 @@ pub fn polyline(r: &Record) -> Option<Vec<Vertex>> {
     (0..count)
         .map(|k| {
             let at = 0x90 + 36 * k;
-            Some(Vertex { at: yx(r, at)?, kind: *r.bytes.get(at + 17)?, radius: real(r, at + 20)?, visible: r.bytes.get(at + 16)? & 0x80 != 0 })
+            // (a vertex that is no curve may keep no radius: not a number)
+            let radius = le::f64(r.bytes, at + 20).map(|v| if v.is_finite() { v } else { 0.0 })?;
+            Some(Vertex { at: yx(r, at)?, kind: *r.bytes.get(at + 17)?, radius, visible: r.bytes.get(at + 16)? & 0x80 != 0 })
         })
         .collect()
 }
@@ -321,9 +323,7 @@ pub fn outline(r: &Record) -> Option<Vec<P2>> {
         }
         kind::POLYGON => {
             // u16 count at 0x8e, points (y, x) from 0x90
-            let count = le::u16(r.bytes, 0x8e)? as usize;
-            let points: Option<Vec<P2>> = (0..count).map(|k| yx(r, 0x90 + 16 * k)).collect();
-            points.filter(|p| p.len() >= 3)
+            polygon_points(r).filter(|p| p.len() >= 3)
         }
         kind::ARC => {
             // start point at 0x90, centre at 0xb0 (both y, x), sweep in degrees at 0xc8
@@ -517,6 +517,23 @@ pub fn trim_loop(r: &Record) -> Option<Vec<P2>> {
         ring.pop();
     }
     (ring.len() >= 3).then_some(ring)
+}
+
+/// The points of a polygon (type 5): a `u16` count at 0x8e, points (y, x) from 0x90. A polygon
+/// of two points is a line.
+pub fn polygon_points(r: &Record) -> Option<Vec<P2>> {
+    let count = le::u16(r.bytes, 0x8e)? as usize;
+    (0..count).map(|k| yx(r, 0x90 + 16 * k)).collect()
+}
+
+/// The line a polygon or polyline of two points is drawn as (it has no outline, having no area).
+pub fn two_points(r: &Record) -> Option<Vec<P2>> {
+    let points = match r.kind() {
+        kind::POLYGON => polygon_points(r)?,
+        kind::POLYLINE => polyline_outline(&polyline(r)?),
+        _ => return None,
+    };
+    (points.len() == 2).then_some(points)
 }
 
 /// The points of a mesh (type 40): `u32` count at 0xd0, then 28 bytes each from 0xd4 (x, y, z
@@ -982,5 +999,32 @@ pub(crate) mod tests {
         // halfway along a quadratic Bezier: a quarter of each end and half of the middle
         let middle = curve.iter().min_by(|a, b| (a[0] - 1000.0).abs().total_cmp(&(b[0] - 1000.0).abs())).unwrap();
         assert!((middle[1] - 500.0).abs() < 1e-6 && (middle[2] - 500.0).abs() < 1e-6, "{middle:?}");
+    }
+
+    /// A polyline whose corners keep no radius (not a number), as the plants of the library
+    /// have them, still has its outline.
+    #[test]
+    fn a_corner_without_a_radius_is_still_a_corner() {
+        let vertices = [[0.0, 0.0], [1000.0, 0.0], [1000.0, 800.0]];
+        let mut b = record(kind::POLYLINE, 0x90 + 36 * vertices.len(), &[]);
+        b[0x8e] = vertices.len() as u8;
+        for (k, at) in vertices.iter().enumerate() {
+            let o = 0x90 + 36 * k;
+            b[o..o + 8].copy_from_slice(&f64::to_le_bytes(at[1]));
+            b[o + 8..o + 16].copy_from_slice(&f64::to_le_bytes(at[0]));
+            b[o + 16] = 0x80;
+            b[o + 20..o + 28].copy_from_slice(&f64::to_le_bytes(f64::NAN));
+        }
+        assert_eq!(outline(&rec(&b)).map(|o| o.len()), Some(3));
+    }
+
+    /// A polygon of two points has no outline, and is drawn as the line between them.
+    #[test]
+    fn a_polygon_of_two_points_is_a_line() {
+        let mut b = record(kind::POLYGON, 0x90 + 32, &[(0x90, 10.0), (0x98, 20.0), (0xa0, 30.0), (0xa8, 40.0)]);
+        b[0x8e] = 2;
+        let r = rec(&b);
+        assert_eq!(outline(&r), None);
+        assert_eq!(two_points(&r), Some(vec![[20.0, 10.0], [40.0, 30.0]]));
     }
 }

@@ -851,6 +851,8 @@ impl Builder<'_, '_> {
                             None => self.pen_line(r, class, key, &outline, shapes::closed(r), place, z, pen),
                         }
                     }
+                } else if let Some(points) = shapes::two_points(r).filter(|_| shapes::stroked(r, class)) {
+                    self.pen_line(r, class, key, &points, false, place, z, pen);
                 } else if let Some(points) = (r.kind() == kind::ARC && shapes::stroked(r, class)).then(|| shapes::arc(r)).flatten() {
                     self.pen_line(r, class, key, &points, false, place, z, pen);
                 }

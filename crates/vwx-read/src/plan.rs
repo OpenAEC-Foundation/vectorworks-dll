@@ -129,7 +129,7 @@ fn segments(r: &vwx_core::container::Record, place: &Affine, out: &mut Vec<[[f32
     let outline = shapes::outline(r);
     let points: Vec<P2> = match r.kind() {
         kind::LINE => shapes::line(r).map(|l| l.to_vec()).unwrap_or_default(),
-        _ => outline.clone().or_else(|| shapes::arc(r)).unwrap_or_default(),
+        _ => outline.clone().or_else(|| shapes::two_points(r)).or_else(|| shapes::arc(r)).unwrap_or_default(),
     };
     if points.len() < 2 || points.iter().flatten().any(|c| !c.is_finite()) {
         return;
