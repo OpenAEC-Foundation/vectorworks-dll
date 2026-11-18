@@ -102,7 +102,7 @@ foreach ($file in $Files) {
     $before = (Documents).Count
     Start-Process $Vectorworks -ArgumentList "`"$copy`""
     $opened = $false
-    for ($t = 0; $t -lt 300; $t += 3) {
+    for ($t = 0; $t -lt 900; $t += 3) {
         Start-Sleep 3
         Dismiss
         if ((Documents).Count -gt $before) { $opened = $true; break }
@@ -114,6 +114,6 @@ foreach ($file in $Files) {
     $ErrorActionPreference = 'Continue'
     $log = & $Viewer $copy --screenshot $shot --view iso --size 1600x1000 --no-remote 2>&1 | Out-String
     $ErrorActionPreference = 'Stop'
-    $loaded = ($log -split "`n" | Where-Object { $_ -like 'loaded*' } | Select-Object -First 1)
+    $loaded = [string]($log -split "`n" | Where-Object { $_ -like "loaded*" } | Select-Object -First 1)
     Add-Content -LiteralPath $index -Value ("{0}`t{1}`tvw={2}`t{3}`t{4}" -f $tag, $file, $opened, $title, ($loaded -replace '\s+$', '')) -Encoding utf8
 }

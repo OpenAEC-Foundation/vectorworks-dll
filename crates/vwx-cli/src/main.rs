@@ -193,7 +193,9 @@ fn run(args: &[String]) -> Result<Option<Value>, String> {
                             }
                         }
                         let props = m.props.iter().find(|p| p.0 == id).map(|p| p.1.as_str()).unwrap_or("");
-                        println!("{id}	{:.3} {:.3} {:.3}	{:.3} {:.3} {:.3}	{}	{}	{props}", lo[0], lo[1], lo[2], hi[0], hi[1], hi[2], count / 3, m.name);
+                        // (the colour of its first vertex)
+                        let color = m.colors.as_ref().and_then(|c| m.indices.get(first as usize).and_then(|&v| c.get(v as usize))).map(|c| format!("{},{},{}", c[0], c[1], c[2])).unwrap_or_default();
+                        println!("{id}	{:.3} {:.3} {:.3}	{:.3} {:.3} {:.3}	{}	{}	{color}	{props}", lo[0], lo[1], lo[2], hi[0], hi[1], hi[2], count / 3, m.name);
                     }
                 }
                 return Ok(None);

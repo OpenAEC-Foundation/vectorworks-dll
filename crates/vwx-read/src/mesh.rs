@@ -85,6 +85,7 @@ pub fn scene_and_drawn(raw: &Raw, info: Info) -> (Scene, Vec<bool>) {
         redraw: false,
         paper: 1.0,
         textures: crate::textures::Colours::default(),
+        inherited: None,
     };
     for (i, r) in raw.records.iter().enumerate() {
         // a sheet layer is paper, not part of the model; a private layer is Vectorworks' own
@@ -298,8 +299,17 @@ fn sheets(raw: &Raw) -> Vec<vwx_model::Sheet> {
         let mut names = raw::layer_texts(layer.bytes).into_iter();
         let (number, title) = (names.next().unwrap_or_default(), names.next().unwrap_or_default());
         // drawn as a layer is, then only its line work kept, flat
-        let mut builder =
-            Builder { raw, batches: BTreeMap::new(), elevation: 0.0, bodies: HashMap::new(), drawn: Vec::new(), redraw: false, paper: 1.0, textures: crate::textures::Colours::default() };
+        let mut builder = Builder {
+            raw,
+            batches: BTreeMap::new(),
+            elevation: 0.0,
+            bodies: HashMap::new(),
+            drawn: Vec::new(),
+            redraw: false,
+            paper: 1.0,
+            textures: crate::textures::Colours::default(),
+            inherited: None,
+        };
         for &child in &raw.children[i] {
             builder.walk(child, &Affine::IDENTITY, false, (i, 0), 0);
         }
@@ -403,6 +413,9 @@ struct Builder<'a, 'b> {
     paper: f64,
     /// The colours of the textures, as objects need them.
     textures: crate::textures::Colours,
+    /// The colour of the texture of the plug-in object whose parts are drawn: what a part
+    /// without a texture of its own or of its class shows.
+    inherited: Option<[u8; 3]>,
 }
 
 impl Builder<'_, '_> {
@@ -666,7 +679,7 @@ impl Builder<'_, '_> {
         let class = raw.by_ref.get(&r.class_id()).map(|&c| &raw.records[c]).filter(|c| c.kind() == kind::CLASS);
         // the colour of its texture (or its class's), as a rendered view shows it, else that of
         // its fill
-        let color = self.textures.of_object(raw, r, class).or_else(|| shapes::fill_index(r, class).and_then(|k| raw.palette.color(k))).unwrap_or(DEFAULT_COLOR);
+        let color = self.textures.of_object(raw, r, class).or(self.inherited).or_else(|| shapes::fill_index(r, class).and_then(|k| raw.palette.color(k))).unwrap_or(DEFAULT_COLOR);
         match r.kind() {
             kind::END | kind::USER_DATA => {}
             // a viewport shows the model on a sheet: what it holds is laid out by it, which is
@@ -788,15 +801,20 @@ impl Builder<'_, '_> {
                 let Some(points) = shapes::mesh_points(r) else {
                     return;
                 };
-                for &c in &raw.children[i] {
-                    let face = &raw.records[c];
-                    if face.kind() != kind::MESH_FACE {
-                        continue;
-                    }
-                    let corners: Option<Vec<P3>> = shapes::mesh_face(face).and_then(|f| f.iter().map(|&k| points.get(k).map(|&p| place.apply(p))).collect());
-                    if let Some(corners) = corners.filter(|c| c.len() >= 3) {
-                        self.face(key, &corners, color, place.mirrors());
-                    }
+                let faces: Vec<Vec<P3>> = raw.children[i]
+                    .iter()
+                    .map(|&c| &raw.records[c])
+                    .filter(|face| face.kind() == kind::MESH_FACE)
+                    .filter_map(|face| shapes::mesh_face(face).and_then(|f| f.iter().map(|&k| points.get(k).map(|&p| place.apply(p))).collect::<Option<Vec<P3>>>()))
+                    .filter(|c| c.len() >= 3)
+                    .collect();
+                // Vectorworks draws a mesh from both sides and keeps the faces of some turned
+                // inward (the surface of a site model runs clockwise seen from above): a mesh
+                // is turned to face outward, or up when it is open (found from the placed corners,
+                // so a mirroring placement is taken into account)
+                let flip = facing_inward(&faces);
+                for corners in faces {
+                    self.face(key, &corners, color, flip);
                 }
             }
             kind::RECTANGLE | kind::ROUNDED_RECTANGLE | kind::OVAL | kind::POLYGON | kind::POLYLINE | kind::ARC => {
@@ -874,6 +892,12 @@ impl Builder<'_, '_> {
                 // a plug-in object holds its parts in its own coordinates
                 let placed = (r.kind() == kind::PLUG_IN_OBJECT).then(|| shapes::plug_in_placement(r)).flatten().map(|p| p.then(place));
                 let place = placed.as_ref().unwrap_or(place);
+                // its parts show its texture where they have none of their own (a site model
+                // keeps the texture of its surface so)
+                let outer = self.inherited;
+                if r.kind() == kind::PLUG_IN_OBJECT {
+                    self.inherited = self.textures.of_object(raw, r, None).or(outer);
+                }
                 let before = self.form(key);
                 for &c in &raw.children[i] {
                     self.walk(c, place, true, key, depth);
@@ -885,6 +909,7 @@ impl Builder<'_, '_> {
                     }
                     self.redraw = again;
                 }
+                self.inherited = outer;
             }
         }
     }
@@ -1037,6 +1062,36 @@ impl Builder<'_, '_> {
 }
 
 /// True when two rings are the same points, to a thousandth of their size.
+/// True when the faces of a mesh face inward: a closed mesh (every edge shared by two faces)
+/// whose volume comes out negative, or an open one whose faces point down more than up
+/// (weighted by their area).
+fn facing_inward(faces: &[Vec<P3>]) -> bool {
+    let mut edges: HashMap<(u64, u64), i32> = HashMap::new();
+    let key = |p: &P3| p.iter().fold(0u64, |h, c| h.wrapping_mul(0x100000001b3).wrapping_add(c.to_bits()));
+    let (mut volume, mut up) = (0.0, 0.0);
+    for face in faces {
+        for k in 0..face.len() {
+            let (a, b) = (key(&face[k]), key(&face[(k + 1) % face.len()]));
+            *edges.entry((a.min(b), a.max(b))).or_insert(0) += 1;
+        }
+        // as a fan of triangles from its first corner
+        for k in 1..face.len() - 1 {
+            let (a, b, c) = (face[0], face[k], face[k + 1]);
+            let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+            let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+            let n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+            volume += a[0] * n[0] + a[1] * n[1] + a[2] * n[2];
+            up += n[2];
+        }
+    }
+    let closed = !edges.is_empty() && edges.values().all(|&n| n == 2);
+    if closed {
+        volume < 0.0
+    } else {
+        up < 0.0
+    }
+}
+
 fn same_ring(a: &[P3], b: &[P3]) -> bool {
     let size = a.iter().flatten().fold(1.0f64, |m, c| m.max(c.abs()));
     a.len() == b.len() && a.iter().zip(b).all(|(p, q)| (0..3).all(|k| (p[k] - q[k]).abs() <= 1e-6 * size))
@@ -1338,6 +1393,22 @@ pub(crate) mod tests {
         assert_eq!(plans.len(), 1);
         assert_eq!((plans[0].layer.as_str(), plans[0].lines.as_slice()), ("L", &[[[2.0, 0.0], [3.0, 0.0]]][..]));
         assert_eq!(plans[0].elements, [(1, 0, 1)]);
+    }
+
+    #[test]
+    fn meshes_are_turned_to_face_up_or_out() {
+        // an open square clockwise seen from above faces down: it is turned; one the other way
+        // round is not
+        let clockwise = vec![vec![[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 1.0, 0.0], [1.0, 0.0, 0.0]]];
+        assert!(facing_inward(&clockwise));
+        let counter: Vec<Vec<P3>> = clockwise.iter().map(|f| f.iter().rev().copied().collect()).collect();
+        assert!(!facing_inward(&counter));
+        // a closed tetrahedron with its faces outward is not turned, inward it is
+        let [a, b, c, d] = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let outward = vec![vec![a, c, b], vec![a, b, d], vec![a, d, c], vec![b, c, d]];
+        assert!(!facing_inward(&outward));
+        let inward: Vec<Vec<P3>> = outward.iter().map(|f| f.iter().rev().copied().collect()).collect();
+        assert!(facing_inward(&inward));
     }
 
     #[test]
