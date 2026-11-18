@@ -173,6 +173,19 @@ pub fn layer_is_sheet(record: &[u8]) -> bool {
     record.get(0x24c) == Some(&2)
 }
 
+/// True for a layer Vectorworks keeps for itself: named `__NNA_PrivateLayer` (32 of them in a
+/// garden design of 2027, holding the 3D symbols and images plug-in objects such as plants
+/// draw with). Vectorworks lists none of them among the layers of the document and draws none.
+pub fn layer_is_private(record: &[u8]) -> bool {
+    layer_name(record).is_some_and(|n| n.starts_with("__NNA_"))
+}
+
+/// True for a design layer that is drawn: a layer record that is no sheet layer and not
+/// private.
+pub fn is_design_layer(r: &vwx_core::container::Record) -> bool {
+    r.kind() == kind::LAYER && !layer_is_sheet(r.bytes) && !layer_is_private(r.bytes)
+}
+
 /// True for a layer that is set invisible: the `i16` at 0xd8 of a layer record is 0 for a
 /// visible layer, -1 for an invisible one and 2 for a greyed one (samples 150, 151, 152).
 pub fn layer_hidden(record: &[u8]) -> bool {

@@ -78,8 +78,8 @@ pub fn scene(raw: &Raw, info: Info) -> Scene {
 pub fn scene_and_drawn(raw: &Raw, info: Info) -> (Scene, Vec<bool>) {
     let mut builder = Builder { raw, batches: BTreeMap::new(), elevation: 0.0, bodies: HashMap::new(), drawn: vec![false; raw.records.len()], redraw: false, paper: 1.0 };
     for (i, r) in raw.records.iter().enumerate() {
-        // a sheet layer is paper, not part of the model
-        if r.kind() != kind::LAYER || raw::layer_is_sheet(r.bytes) {
+        // a sheet layer is paper, not part of the model; a private layer is Vectorworks' own
+        if !raw::is_design_layer(r) {
             continue;
         }
         // 3D objects hold their height in the document; 2D shapes lie on their layer
@@ -137,7 +137,7 @@ pub fn scene_and_drawn(raw: &Raw, info: Info) -> (Scene, Vec<bool>) {
 fn texts(raw: &Raw) -> Vec<vwx_model::Text> {
     let mut out = Vec::new();
     for (i, layer) in raw.records.iter().enumerate() {
-        if layer.kind() != kind::LAYER || raw::layer_is_sheet(layer.bytes) {
+        if !raw::is_design_layer(layer) {
             continue;
         }
         let name = raw::layer_name(layer.bytes).unwrap_or_default();
@@ -1324,6 +1324,25 @@ pub(crate) mod tests {
         assert_eq!(plans.len(), 1);
         assert_eq!((plans[0].layer.as_str(), plans[0].lines.as_slice()), ("L", &[[[2.0, 0.0], [3.0, 0.0]]][..]));
         assert_eq!(plans[0].elements, [(1, 0, 1)]);
+    }
+
+    #[test]
+    fn private_layers_are_not_drawn() {
+        // a line on a layer of the document and one on a private layer of Vectorworks
+        let records = vec![
+            tagged(layer("L", 0.0), 1, 1, 0),
+            tagged(pen(record(kind::LINE, 140, &[(0x80, 1000.0)])), 2, 0, 0),
+            tagged(record(kind::END, 88, &[]), 2, 0, 0),
+            tagged(layer("__NNA_PrivateLayer", 0.0), 1, 2, 0),
+            tagged(pen(record(kind::LINE, 140, &[(0x80, 1000.0)])), 3, 0, 0),
+            tagged(record(kind::END, 88, &[]), 3, 0, 0),
+        ];
+        let u = unpacked(records);
+        let raw = Raw::new(&u).unwrap();
+        let scene = scene(&raw, Info::default());
+        assert_eq!(scene.meshes.len(), 1);
+        assert_eq!(scene.meshes[0].layer, "L");
+        assert_eq!(crate::plan::plans(&raw).len(), 1);
     }
 
     #[test]

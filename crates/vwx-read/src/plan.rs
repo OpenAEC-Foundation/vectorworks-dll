@@ -22,7 +22,7 @@ const OTHER_HOLDERS: [u8; 4] = [71, 82, 83, 87];
 pub fn plans(raw: &Raw) -> Vec<Plan> {
     let mut out = Vec::new();
     for (i, layer) in raw.records.iter().enumerate() {
-        if layer.kind() != kind::LAYER || raw::layer_is_sheet(layer.bytes) {
+        if !raw::is_design_layer(layer) {
             continue;
         }
         let mut plan = Plan { layer: raw::layer_name(layer.bytes).unwrap_or_default(), ..Plan::default() };

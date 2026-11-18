@@ -133,7 +133,7 @@ pub fn entries(raw: &Raw, drawn: &[bool], texts: &HashSet<usize>) -> Vec<Entry> 
     let mut out = Vec::new();
     let mut seen = HashMap::new();
     for (i, r) in raw.records.iter().enumerate() {
-        if r.kind() != kind::LAYER || crate::raw::layer_is_sheet(r.bytes) {
+        if !crate::raw::is_design_layer(r) {
             continue;
         }
         let around = Around { object_drawn: None, solid: false, cutter: false, hidden: crate::raw::layer_hidden(r.bytes) };
