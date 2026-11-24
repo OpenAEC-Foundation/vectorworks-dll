@@ -3,7 +3,7 @@
 Native library (DLL) that reads Vectorworks `.vwx` files without Vectorworks, for use by
 [open-3d-viewer](https://github.com/OpenAEC-Foundation/open-3d-viewer) and other tools.
 
-**Status:** private, pre-alpha. All 787 files of a Vectorworks 2027 installation open, 419 of
+**Status:** pre-alpha. All 787 files of a Vectorworks 2027 installation open, 419 of
 them give meshes: extrudes, meshes, 3D polygons, placed symbols and the solids kept as Parasolid
 bodies (walls, CSG solids, sweeps). Open: free-form faces, polylines, text, records, saved
 views, sheets. Do not make this repository

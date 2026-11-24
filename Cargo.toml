@@ -13,7 +13,7 @@ members = [
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.88"
-license = "LicenseRef-Proprietary"
+license = "LGPL-3.0-or-later"
 publish = false
 
 [workspace.dependencies]
